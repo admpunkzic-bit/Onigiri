@@ -1,3 +1,10 @@
+# Environment & Secrets
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -9,28 +16,45 @@ build/
 .venv/
 venv/
 env/
-*.db
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Node
+# Databases / SQLite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Node & Frontend
 node_modules/
 dist/
+dist-ssr/
 .vite/
+*.local
 
-# IDE
-.vscode/
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE & Editors
+.vscode/*
+!.vscode/extensions.json
 .idea/
 *.swp
 *.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
 
-# OS
+# Operating Systems
 .DS_Store
 Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
