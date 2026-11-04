@@ -1,7 +1,11 @@
 import { BookOpen, Sparkles } from 'lucide-react'
 import CatalogStub from '../components/CatalogStub'
+import ServerStatus from '../components/ServerStatus'
+import { useServerHealth } from '../hooks/useServerHealth'
 
 export default function HomePage() {
+  const { state, refresh } = useServerHealth()
+
   return (
     <div className="px-4 pt-6">
       {/* Header */}
@@ -12,9 +16,12 @@ export default function HomePage() {
           </div>
           <h1 className="text-xl font-bold text-text-primary">Onigiri</h1>
         </div>
-        <span className="text-xs text-text-secondary bg-surface px-3 py-1 rounded-full">
-          v0.1.0
-        </span>
+        <div className="flex items-center gap-2">
+          <ServerStatus state={state} onRetry={refresh} />
+          <span className="text-xs text-text-secondary bg-surface px-3 py-1 rounded-full">
+            v0.1.0
+          </span>
+        </div>
       </header>
 
       {/* Welcome banner */}
