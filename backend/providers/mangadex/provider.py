@@ -165,9 +165,21 @@ class MangaDexProvider(BaseMangaProvider):
                 f"Missing or invalid hostname in MangaDex@Home baseUrl: '{clean_url}'"
             )
 
-        if parsed.username or parsed.password:
+        if parsed.username is not None or parsed.password is not None:
             raise ProviderNetworkError(
                 f"MangaDex@Home baseUrl contains credentials: '{clean_url}'"
+            )
+
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ProviderNetworkError(
+                f"Invalid port in MangaDex@Home baseUrl '{clean_url}': {exc}"
+            ) from exc
+
+        if port is not None and not (1 <= port <= 65535):
+            raise ProviderNetworkError(
+                f"Port {port} out of valid range (1-65535) in MangaDex@Home baseUrl: '{clean_url}'"
             )
 
         return clean_url.rstrip("/")

@@ -548,9 +548,15 @@ async def test_get_chapter_pages_data_saver(mock_mangadex: MangaDexProvider):
     "https:///path",                # missing host
     "https://user:pass@example.com", # contains username and password
     "https://user@example.com",     # contains username
+    "https://@example.com",         # empty credentials prefix
+    "https://:pass@example.com",    # empty username with password
+    "https://user:@example.com",    # username with empty password
+    "https://example.com:invalid",  # non-numeric port
+    "https://example.com:99999",    # port out of range (>65535)
+    "https://example.com:0",        # port out of range (<1)
 ])
 async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url(invalid_url: str):
-    """Verify that insecure (HTTP), malformed, empty, or credential-bearing baseUrl is rejected."""
+    """Verify that insecure (HTTP), malformed, empty, credential-bearing, or bad port baseUrl is rejected."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -570,14 +576,18 @@ async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url(invalid_ur
 
 
 @pytest.mark.anyio
-async def test_get_chapter_pages_accepts_valid_https_url():
-    """Verify that a valid HTTPS baseUrl with hostname is accepted."""
+@pytest.mark.parametrize("valid_url", [
+    "https://node.mangadex.network",
+    "https://example.com:443",
+])
+async def test_get_chapter_pages_accepts_valid_https_url(valid_url: str):
+    """Verify that a valid HTTPS baseUrl with hostname and optional valid port is accepted."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
                 "result": "ok",
-                "baseUrl": "https://node.mangadex.network",
+                "baseUrl": valid_url,
                 "chapter": {"hash": "abc123hash", "data": ["p1.jpg"]},
             },
         )
@@ -588,7 +598,8 @@ async def test_get_chapter_pages_accepts_valid_https_url():
 
     res = await provider.get_chapter_pages("ch-1-id")
     assert len(res.pages) == 1
-    assert res.pages[0].image_url == "https://node.mangadex.network/data/abc123hash/p1.jpg"
+    clean_base = valid_url.rstrip("/")
+    assert res.pages[0].image_url == f"{clean_base}/data/abc123hash/p1.jpg"
 
 
 # ==============================================================================
