@@ -1,0 +1,182 @@
+"""
+Pydantic schemas for Manga catalog entities, validation and serialization.
+"""
+
+from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ==========================================
+# Genre Schemas
+# ==========================================
+
+class GenreBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    slug: str = Field(..., min_length=1, max_length=100)
+
+
+class GenreCreate(GenreBase):
+    pass
+
+
+class GenreRead(GenreBase):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Author Schemas
+# ==========================================
+
+class AuthorBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+
+
+class AuthorCreate(AuthorBase):
+    pass
+
+
+class AuthorRead(AuthorBase):
+    id: int
+    role: Optional[str] = "author"
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Chapter Page Schemas
+# ==========================================
+
+class ChapterPageBase(BaseModel):
+    page_number: int = Field(..., ge=1)
+    image_url: str = Field(..., min_length=1)
+
+
+class ChapterPageCreate(ChapterPageBase):
+    chapter_id: int
+
+
+class ChapterPageRead(ChapterPageBase):
+    id: int
+    chapter_id: int
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Chapter Schemas
+# ==========================================
+
+class ChapterBase(BaseModel):
+    chapter_number: float = Field(..., ge=0)
+    volume_number: Optional[int] = Field(None, ge=0)
+    title: Optional[str] = None
+
+
+class ChapterCreate(ChapterBase):
+    manga_id: int
+    manga_source_id: int
+
+
+class ChapterRead(ChapterBase):
+    id: int
+    manga_id: int
+    manga_source_id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    pages_count: Optional[int] = 0
+    pages: Optional[List[ChapterPageRead]] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Manga Source Schemas
+# ==========================================
+
+class MangaSourceBase(BaseModel):
+    source_name: str = Field(..., min_length=1, max_length=100)
+    source_manga_id: str = Field(..., min_length=1, max_length=255)
+    source_url: Optional[str] = None
+
+
+class MangaSourceCreate(MangaSourceBase):
+    manga_id: int
+
+
+class MangaSourceRead(MangaSourceBase):
+    id: int
+    manga_id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Manga Schemas
+# ==========================================
+
+class MangaBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    slug: str = Field(..., min_length=1, max_length=500)
+    original_title: Optional[str] = None
+    description: Optional[str] = None
+    cover_url: Optional[str] = None
+    banner_url: Optional[str] = None
+    status: str = Field(default="ongoing", description="ongoing, completed, hiatus, cancelled")
+    type: str = Field(default="manga", description="manga, manhwa, manhua, one_shot")
+    release_year: Optional[int] = None
+    rating: float = Field(default=0.0, ge=0.0, le=10.0)
+    views_count: int = Field(default=0, ge=0)
+
+
+class MangaCreate(MangaBase):
+    pass
+
+
+class MangaUpdate(BaseModel):
+    title: Optional[str] = None
+    slug: Optional[str] = None
+    original_title: Optional[str] = None
+    description: Optional[str] = None
+    cover_url: Optional[str] = None
+    banner_url: Optional[str] = None
+    status: Optional[str] = None
+    type: Optional[str] = None
+    release_year: Optional[int] = None
+    rating: Optional[float] = None
+    views_count: Optional[int] = None
+
+
+class MangaListRead(BaseModel):
+    """Compact representation for catalog grids, search results, library."""
+    id: int
+    title: str
+    slug: str
+    original_title: Optional[str] = None
+    cover_url: Optional[str] = None
+    status: str
+    type: str
+    release_year: Optional[int] = None
+    rating: float
+    views_count: int
+    genres: List[GenreRead] = []
+    authors: List[AuthorRead] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MangaDetailRead(MangaListRead):
+    """Full detailed representation with description, banners, sources and chapters."""
+    description: Optional[str] = None
+    banner_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    sources: List[MangaSourceRead] = []
+    chapters: List[ChapterRead] = []
+
+    model_config = ConfigDict(from_attributes=True)
