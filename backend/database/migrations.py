@@ -384,6 +384,16 @@ def _migration_004_manga_sources_global_unique(conn: sqlite3.Connection) -> None
     )
 
     if needs_alter:
+        # Check if foreign keys are currently active and cannot be disabled due to an outer transaction
+        is_fk_active = bool(cursor.execute("PRAGMA foreign_keys").fetchone()[0])
+        if is_fk_active:
+            raise sqlite3.OperationalError(
+                "Cannot execute migration 4 inside an active transaction: altering table "
+                "'manga_sources' requires disabling foreign keys (PRAGMA foreign_keys = OFF), "
+                "which SQLite prohibits within an active transaction. "
+                "Commit or rollback the outer transaction before executing migrations."
+            )
+
         # Check for conflicting duplicates
         cursor.execute(
             """

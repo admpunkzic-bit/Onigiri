@@ -1004,3 +1004,171 @@ def test_seed_detects_conflict_on_foreign_manga(migrated_db: sqlite3.Connection)
             seed_data(migrated_db)
     finally:
         seed.SAMPLE_MANGA = original_sample
+
+
+# ==============================================================================
+# 16. Nested Transaction Safety & Outer Transaction Protection (TASK 007.4)
+# ==============================================================================
+
+def test_migration_004_rejects_run_inside_outer_transaction_to_prevent_fk_cascade(tmp_path: Path):
+    """
+    Ensure that if a caller invokes run_migrations inside an active outer transaction,
+    Migration 4 safely aborts before modifying any data because SQLite prohibits
+    disabling PRAGMA foreign_keys inside an open transaction.
+    Chapters, pages, and outer transaction must be 100% preserved.
+    """
+    db_file = tmp_path / "nested_tx_test.db"
+    conn = get_connection(db_file)
+    cursor = conn.cursor()
+
+    # 1. Setup exact TASK 007 state: versions 1, 2, 3 applied
+    cursor.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("INSERT INTO schema_migrations VALUES (1, '001', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (2, '002', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (3, '003', CURRENT_TIMESTAMP)")
+
+    cursor.execute("CREATE TABLE manga (id INTEGER PRIMARY KEY, title TEXT, slug TEXT UNIQUE)")
+    cursor.execute(
+        """
+        CREATE TABLE manga_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            source_name TEXT NOT NULL,
+            source_manga_id TEXT NOT NULL,
+            source_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_id, source_name, source_manga_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE chapters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            manga_source_id INTEGER NOT NULL REFERENCES manga_sources(id) ON DELETE CASCADE,
+            chapter_number REAL NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE chapter_pages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+            page_number INTEGER NOT NULL,
+            image_url TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute("INSERT INTO manga VALUES (10, 'Manga 10', 'm-10')")
+    cursor.execute("INSERT INTO manga_sources VALUES (50, 10, 'mangadex', 'md-50', 'http://url', '2026', '2026')")
+    cursor.execute("INSERT INTO chapters VALUES (500, 10, 50, 1.0)")
+    cursor.execute("INSERT INTO chapter_pages VALUES (5000, 500, 1, 'http://p1')")
+    conn.commit()
+
+    # Verify foreign_keys is ON
+    assert bool(cursor.execute("PRAGMA foreign_keys").fetchone()[0]) is True
+
+    # 2. Caller opens outer transaction
+    conn.execute("BEGIN IMMEDIATE")
+    assert conn.in_transaction is True
+
+    # 3. Invoking run_migrations must safely reject table alteration
+    with pytest.raises(sqlite3.OperationalError, match="Cannot execute migration 4 inside an active transaction"):
+        run_migrations(conn)
+
+    # 4. Verify chapters and pages were NOT deleted
+    cursor.execute("SELECT COUNT(*) FROM chapters WHERE id = 500")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM chapter_pages WHERE id = 5000")
+    assert cursor.fetchone()[0] == 1
+
+    # 5. Verify outer transaction remains active and manageable by caller
+    assert conn.in_transaction is True
+    conn.execute("INSERT INTO manga VALUES (99, 'Caller Manga', 'caller-manga')")
+    conn.commit()
+
+    # 6. Verify foreign_keys setting is still ON
+    assert bool(cursor.execute("PRAGMA foreign_keys").fetchone()[0]) is True
+
+    # 7. Now run run_migrations without active outer transaction -> Must SUCCEED cleanly
+    run_migrations(conn)
+
+    # Migration 4 applied
+    cursor.execute("SELECT version FROM schema_migrations WHERE version = 4")
+    assert cursor.fetchone() is not None
+
+    # Chapters and pages still intact
+    cursor.execute("SELECT COUNT(*) FROM chapters WHERE id = 500")
+    assert cursor.fetchone()[0] == 1
+    cursor.execute("SELECT COUNT(*) FROM chapter_pages WHERE id = 5000")
+    assert cursor.fetchone()[0] == 1
+
+    # foreign_key_check is completely clean
+    cursor.execute("PRAGMA foreign_key_check")
+    assert cursor.fetchall() == []
+
+    conn.close()
+
+
+def test_savepoint_rollback_on_migration_fault_preserves_outer_transaction(tmp_path: Path):
+    """
+    Ensure that when a migration fails inside a SAVEPOINT (nested in caller's tx),
+    the SAVEPOINT rolls back, data is preserved, and caller's outer transaction
+    remains active and intact.
+    """
+    from database import migrations
+
+    db_file = tmp_path / "savepoint_test.db"
+    conn = get_connection(db_file)
+    cursor = conn.cursor()
+
+    # First run base migrations so DB is up to date
+    run_migrations(conn)
+
+    # Start outer transaction
+    conn.execute("BEGIN IMMEDIATE")
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Outer Manga', 'outer-manga')")
+
+    def failing_migration(connection: sqlite3.Connection):
+        connection.execute("CREATE TABLE sp_fault_table (id INTEGER PRIMARY KEY)")
+        raise RuntimeError("Deliberate fault in savepoint")
+
+    fault_version = 777
+    orig = list(migrations.MIGRATIONS)
+    migrations.MIGRATIONS.append((fault_version, "777_fault", failing_migration))
+
+    try:
+        with pytest.raises(RuntimeError, match="Deliberate fault"):
+            run_migrations(conn)
+
+        # 1. Faulty table was rolled back
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sp_fault_table'")
+        assert cursor.fetchone() is None
+
+        # 2. Version was not recorded
+        cursor.execute("SELECT version FROM schema_migrations WHERE version = ?", (fault_version,))
+        assert cursor.fetchone() is None
+
+        # 3. Caller's outer transaction is still active and can be committed
+        assert conn.in_transaction is True
+        conn.commit()
+
+        # 4. Caller's data was committed successfully
+        cursor.execute("SELECT title FROM manga WHERE slug = 'outer-manga'")
+        assert cursor.fetchone()[0] == "Outer Manga"
+
+    finally:
+        migrations.MIGRATIONS = orig
+        conn.close()
