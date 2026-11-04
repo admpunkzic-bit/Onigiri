@@ -64,6 +64,21 @@ async def health_check():
 # Provider Endpoints
 # ==============================================================================
 
+def _validate_russian_language_params(lang: Optional[str], language: Optional[str]) -> None:
+    """
+    Validate language query parameters independently.
+    If either parameter is provided, it must strictly be 'ru'.
+    If both are provided, both must be 'ru'.
+    Any other value raises HTTP 400 Bad Request.
+    """
+    for param_name, param_val in (("lang", lang), ("language", language)):
+        if param_val is not None and param_val.strip().lower() != "ru":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only Russian language ('ru') is supported in Onigiri. Parameter '{param_name}' must be 'ru'.",
+            )
+
+
 @router.get("/providers")
 async def list_providers(registry: ProviderRegistry = Depends(get_registry)):
     """List all available external manga providers."""
@@ -81,12 +96,7 @@ async def search_provider(
     provider: BaseMangaProvider = Depends(get_provider),
 ):
     """Search manga across an external provider (strictly restricted to Russian translations)."""
-    requested_lang = language or lang
-    if requested_lang is not None and requested_lang.strip().lower() != "ru":
-        raise HTTPException(
-            status_code=400,
-            detail="Only Russian language ('ru') is supported in Onigiri",
-        )
+    _validate_russian_language_params(lang, language)
     try:
         return await provider.search(query=q, page=page, limit=limit, languages=["ru"])
     except ProviderRateLimitError as exc:
@@ -132,12 +142,7 @@ async def get_manga_chapters(
     provider: BaseMangaProvider = Depends(get_provider),
 ):
     """Get paginated chapter feed for a manga (strictly Russian translations only)."""
-    requested_lang = language or lang
-    if requested_lang is not None and requested_lang.strip().lower() != "ru":
-        raise HTTPException(
-            status_code=400,
-            detail="Only Russian language ('ru') is supported in Onigiri",
-        )
+    _validate_russian_language_params(lang, language)
     try:
         return await provider.get_chapters(
             provider_manga_id=provider_manga_id,

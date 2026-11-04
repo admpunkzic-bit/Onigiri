@@ -5,6 +5,7 @@ MangaDex provider implementation of BaseMangaProvider.
 from datetime import datetime
 import logging
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from providers.base import (
     BaseMangaProvider,
@@ -122,6 +123,55 @@ class MangaDexProvider(BaseMangaProvider):
                 genres.append(genre_name)
         return genres
 
+    @staticmethod
+    def _has_russian_translation(attributes: Dict[str, Any]) -> bool:
+        """
+        Check if MangaDex attributes explicitly declare available Russian translation.
+        Strict rule:
+        - Must be a non-empty list containing 'ru'.
+        - If missing, None, empty, or lacks 'ru', returns False.
+        """
+        avail = attributes.get("availableTranslatedLanguages")
+        if not isinstance(avail, list) or not avail:
+            return False
+        return "ru" in avail
+
+    @staticmethod
+    def _validate_at_home_base_url(base_url: Any) -> str:
+        """
+        Validate MangaDex@Home baseUrl using urllib.parse.urlsplit.
+        Requirements:
+        - Scheme must be strictly 'https'.
+        - Hostname must exist and be valid.
+        - Must NOT contain username or password.
+        - Invalid URLs raise ProviderNetworkError.
+        """
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ProviderNetworkError("MangaDex@Home baseUrl is missing or empty")
+
+        clean_url = base_url.strip()
+        try:
+            parsed = urlsplit(clean_url)
+        except Exception as exc:
+            raise ProviderNetworkError(f"Malformed MangaDex@Home baseUrl '{clean_url}': {exc}") from exc
+
+        if parsed.scheme != "https":
+            raise ProviderNetworkError(
+                f"Insecure scheme '{parsed.scheme}' in MangaDex@Home baseUrl '{clean_url}'. Must be 'https'."
+            )
+
+        if not parsed.hostname:
+            raise ProviderNetworkError(
+                f"Missing or invalid hostname in MangaDex@Home baseUrl: '{clean_url}'"
+            )
+
+        if parsed.username or parsed.password:
+            raise ProviderNetworkError(
+                f"MangaDex@Home baseUrl contains credentials: '{clean_url}'"
+            )
+
+        return clean_url.rstrip("/")
+
     def _build_manga_item(self, data: Dict[str, Any]) -> ProviderMangaItem:
         """Convert a MangaDex manga data object into ProviderMangaItem."""
         manga_id = data["id"]
@@ -132,9 +182,8 @@ class MangaDexProvider(BaseMangaProvider):
         genres = self._parse_genres(attrs)
         cover_url = self._parse_cover_url(manga_id, rels)
 
-        raw_avail = attrs.get("availableTranslatedLanguages") or []
-        # Onigiri only exposes Russian content
-        supported_langs = ["ru"] if ("ru" in raw_avail or not raw_avail) else []
+        # Onigiri only exposes Russian content. If Russian is confirmed, ['ru'], else []
+        supported_langs = ["ru"] if self._has_russian_translation(attrs) else []
 
         return ProviderMangaItem(
             provider_id=self.provider_id,
@@ -187,8 +236,7 @@ class MangaDexProvider(BaseMangaProvider):
         filtered_items: List[ProviderMangaItem] = []
         for item in data_list:
             item_attrs = item.get("attributes") or {}
-            avail_langs = item_attrs.get("availableTranslatedLanguages") or []
-            if avail_langs and "ru" not in avail_langs:
+            if not self._has_russian_translation(item_attrs):
                 continue
             filtered_items.append(self._build_manga_item(item))
 
@@ -208,8 +256,7 @@ class MangaDexProvider(BaseMangaProvider):
         raw = await self._client.get_manga(provider_manga_id)
         data = raw.get("data") or {}
         attrs = data.get("attributes") or {}
-        avail_langs = attrs.get("availableTranslatedLanguages") or []
-        if avail_langs and "ru" not in avail_langs:
+        if not self._has_russian_translation(attrs):
             raise ProviderNotFoundError(
                 f"Manga '{provider_manga_id}' has no Russian translation available in Onigiri."
             )
@@ -327,15 +374,10 @@ class MangaDexProvider(BaseMangaProvider):
         """
         Fetch page image URLs for a chapter using MangaDex@Home.
         Does not invent expiration timestamps: expires_at is None.
-        Enforces valid HTTPS baseUrl.
+        Enforces valid HTTPS baseUrl with safe hostname and no credentials.
         """
         raw = await self._client.get_at_home_server(provider_chapter_id)
-
-        base_url = raw.get("baseUrl")
-        if not base_url or not isinstance(base_url, str) or not base_url.startswith("https://"):
-            raise ProviderNetworkError(
-                f"Insecure or invalid baseUrl received from MangaDex@Home: {base_url}"
-            )
+        base_url = self._validate_at_home_base_url(raw.get("baseUrl"))
 
         ch_dict = raw.get("chapter") or {}
         ch_hash = ch_dict.get("hash")

@@ -101,6 +101,71 @@ MOCK_MANGA_NO_RU = {
     "relationships": [],
 }
 
+MOCK_MANGA_EMPTY_LANGS = {
+    "id": "empty-langs-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "Empty Languages Manga"},
+        "altTitles": [],
+        "status": "ongoing",
+        "availableTranslatedLanguages": [],
+        "tags": [],
+    },
+    "relationships": [],
+}
+
+MOCK_MANGA_MISSING_LANGS = {
+    "id": "missing-langs-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "Missing Languages Manga"},
+        "altTitles": [],
+        "status": "ongoing",
+        "tags": [],
+        # availableTranslatedLanguages omitted
+    },
+    "relationships": [],
+}
+
+MOCK_MANGA_EN_ONLY = {
+    "id": "en-only-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "English Only Manga"},
+        "altTitles": [],
+        "status": "ongoing",
+        "availableTranslatedLanguages": ["en"],
+        "tags": [],
+    },
+    "relationships": [],
+}
+
+MOCK_MANGA_RU_ONLY = {
+    "id": "ru-only-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "Russian Only Manga"},
+        "altTitles": [],
+        "status": "ongoing",
+        "availableTranslatedLanguages": ["ru"],
+        "tags": [],
+    },
+    "relationships": [],
+}
+
+MOCK_MANGA_MULTI_WITH_RU = {
+    "id": "multi-with-ru-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "Multilingual Manga"},
+        "altTitles": [],
+        "status": "ongoing",
+        "availableTranslatedLanguages": ["en", "ja", "ru"],
+        "tags": [],
+    },
+    "relationships": [],
+}
+
 MOCK_SEARCH_WITH_MIXED_LANGUAGES = {
     "result": "ok",
     "response": "collection",
@@ -108,6 +173,22 @@ MOCK_SEARCH_WITH_MIXED_LANGUAGES = {
     "limit": 20,
     "offset": 0,
     "total": 2,
+}
+
+MOCK_SEARCH_ALL_CASES = {
+    "result": "ok",
+    "response": "collection",
+    "data": [
+        MOCK_MANGA_PAYLOAD["data"],  # has ru -> keep
+        MOCK_MANGA_RU_ONLY,          # has ru -> keep
+        MOCK_MANGA_MULTI_WITH_RU,    # has ru -> keep
+        MOCK_MANGA_EMPTY_LANGS,      # [] -> exclude
+        MOCK_MANGA_MISSING_LANGS,    # missing -> exclude
+        MOCK_MANGA_EN_ONLY,          # en only -> exclude
+    ],
+    "limit": 20,
+    "offset": 0,
+    "total": 6,
 }
 
 MOCK_EMPTY_SEARCH_PAYLOAD = {
@@ -203,6 +284,8 @@ def mock_mangadex():
             query = request.url.params.get("title", "")
             if "empty" in query:
                 return httpx.Response(200, json=MOCK_EMPTY_SEARCH_PAYLOAD)
+            if "all_cases" in query:
+                return httpx.Response(200, json=MOCK_SEARCH_ALL_CASES)
             if "mixed" in query:
                 return httpx.Response(200, json=MOCK_SEARCH_WITH_MIXED_LANGUAGES)
             return httpx.Response(200, json=MOCK_SEARCH_PAYLOAD)
@@ -222,6 +305,17 @@ def mock_mangadex():
             return httpx.Response(200, json=MOCK_CHAPTERS_PAYLOAD)
 
         if path.startswith("/manga/"):
+            m_id = path.split("/")[2]
+            if m_id == "empty-langs-id":
+                return httpx.Response(200, json={"result": "ok", "data": MOCK_MANGA_EMPTY_LANGS})
+            if m_id == "missing-langs-id":
+                return httpx.Response(200, json={"result": "ok", "data": MOCK_MANGA_MISSING_LANGS})
+            if m_id == "en-only-id":
+                return httpx.Response(200, json={"result": "ok", "data": MOCK_MANGA_EN_ONLY})
+            if m_id == "ru-only-id":
+                return httpx.Response(200, json={"result": "ok", "data": MOCK_MANGA_RU_ONLY})
+            if m_id == "multi-with-ru-id":
+                return httpx.Response(200, json={"result": "ok", "data": MOCK_MANGA_MULTI_WITH_RU})
             return httpx.Response(200, json=MOCK_MANGA_PAYLOAD)
 
         if path.startswith("/at-home/server/"):
@@ -278,6 +372,29 @@ async def test_search_filters_out_manga_without_russian_translation(mock_mangade
 
 
 @pytest.mark.anyio
+async def test_search_all_language_cases(mock_mangadex: MangaDexProvider):
+    """
+    Verify search filters out:
+    - empty language list
+    - missing language field
+    - en-only titles
+    And retains titles with confirmed 'ru' translation.
+    """
+    res = await mock_mangadex.search(query="all_cases", page=1, limit=10)
+    assert res.total == 6
+    # 3 titles with Russian must be retained, 3 invalid titles filtered out
+    assert len(res.items) == 3
+    retained_ids = {item.provider_manga_id for item in res.items}
+    assert retained_ids == {
+        "e896c48c-3150-437d-ba57-d8567eb399ae",
+        "ru-only-id",
+        "multi-with-ru-id",
+    }
+    for item in res.items:
+        assert item.available_languages == ["ru"]
+
+
+@pytest.mark.anyio
 async def test_search_rejects_non_russian_language(mock_mangadex: MangaDexProvider):
     """Direct provider call rejects non-ru language filter."""
     with pytest.raises(ValueError, match="Onigiri only supports 'ru'"):
@@ -293,7 +410,7 @@ async def test_search_empty(mock_mangadex: MangaDexProvider):
 
 
 # ==============================================================================
-# 2. Details Tests
+# 2. Details Tests (Strict Russian Translation Verification)
 # ==============================================================================
 
 @pytest.mark.anyio
@@ -303,6 +420,43 @@ async def test_get_manga_details_success(mock_mangadex: MangaDexProvider):
     assert manga.title == "Chainsaw Man"
     assert manga.release_year == 2018
     assert manga.available_languages == ["ru"]
+
+
+@pytest.mark.anyio
+async def test_get_manga_details_ru_only(mock_mangadex: MangaDexProvider):
+    """Manga with only 'ru' translation allowed."""
+    manga = await mock_mangadex.get_manga_details("ru-only-id")
+    assert manga.provider_manga_id == "ru-only-id"
+    assert manga.available_languages == ["ru"]
+
+
+@pytest.mark.anyio
+async def test_get_manga_details_multilingual_with_ru(mock_mangadex: MangaDexProvider):
+    """Manga with ['en', 'ja', 'ru'] translation allowed, exposed as ['ru']."""
+    manga = await mock_mangadex.get_manga_details("multi-with-ru-id")
+    assert manga.provider_manga_id == "multi-with-ru-id"
+    assert manga.available_languages == ["ru"]
+
+
+@pytest.mark.anyio
+async def test_get_manga_details_empty_languages_list(mock_mangadex: MangaDexProvider):
+    """Manga with empty list [] of languages rejected as not found."""
+    with pytest.raises(ProviderNotFoundError, match="no Russian translation available"):
+        await mock_mangadex.get_manga_details("empty-langs-id")
+
+
+@pytest.mark.anyio
+async def test_get_manga_details_missing_languages_field(mock_mangadex: MangaDexProvider):
+    """Manga with missing availableTranslatedLanguages field rejected as not found."""
+    with pytest.raises(ProviderNotFoundError, match="no Russian translation available"):
+        await mock_mangadex.get_manga_details("missing-langs-id")
+
+
+@pytest.mark.anyio
+async def test_get_manga_details_en_only(mock_mangadex: MangaDexProvider):
+    """Manga with only ['en'] translation rejected as not found."""
+    with pytest.raises(ProviderNotFoundError, match="no Russian translation available"):
+        await mock_mangadex.get_manga_details("en-only-id")
 
 
 # ==============================================================================
@@ -386,14 +540,23 @@ async def test_get_chapter_pages_data_saver(mock_mangadex: MangaDexProvider):
 
 
 @pytest.mark.anyio
-async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url():
-    """Verify that insecure (HTTP) or missing baseUrl is rejected with ProviderNetworkError."""
+@pytest.mark.parametrize("invalid_url", [
+    "",                             # empty string
+    "   ",                          # whitespace only
+    "https://",                     # missing hostname
+    "http://example.com",           # insecure HTTP scheme
+    "https:///path",                # missing host
+    "https://user:pass@example.com", # contains username and password
+    "https://user@example.com",     # contains username
+])
+async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url(invalid_url: str):
+    """Verify that insecure (HTTP), malformed, empty, or credential-bearing baseUrl is rejected."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
                 "result": "ok",
-                "baseUrl": "http://insecure.node.network",  # Insecure HTTP
+                "baseUrl": invalid_url,
                 "chapter": {"hash": "abc", "data": ["p1.jpg"]},
             },
         )
@@ -402,8 +565,30 @@ async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url():
     client = MangaDexHttpClient(client=httpx.AsyncClient(transport=transport), min_request_interval=0.0)
     provider = MangaDexProvider(client=client)
 
-    with pytest.raises(ProviderNetworkError, match="Insecure or invalid baseUrl"):
+    with pytest.raises(ProviderNetworkError):
         await provider.get_chapter_pages("ch-1-id")
+
+
+@pytest.mark.anyio
+async def test_get_chapter_pages_accepts_valid_https_url():
+    """Verify that a valid HTTPS baseUrl with hostname is accepted."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "result": "ok",
+                "baseUrl": "https://node.mangadex.network",
+                "chapter": {"hash": "abc123hash", "data": ["p1.jpg"]},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = MangaDexHttpClient(client=httpx.AsyncClient(transport=transport), min_request_interval=0.0)
+    provider = MangaDexProvider(client=client)
+
+    res = await provider.get_chapter_pages("ch-1-id")
+    assert len(res.pages) == 1
+    assert res.pages[0].image_url == "https://node.mangadex.network/data/abc123hash/p1.jpg"
 
 
 # ==============================================================================
@@ -651,6 +836,7 @@ def test_api_routes_providers_integration(mock_mangadex: MangaDexProvider):
         assert p.get("languages") == ["ru"]
 
     # 3. Search endpoint (Russian enforced, non-Russian rejected)
+    # Absence of parameters -> defaults to 'ru' (200)
     r_search = client.get("/api/providers/mangadex/search?q=Chainsaw")
     assert r_search.status_code == 200
     search_data = r_search.json()
@@ -658,7 +844,21 @@ def test_api_routes_providers_integration(mock_mangadex: MangaDexProvider):
     assert search_data["items"][0]["title"] == "Chainsaw Man"
     assert search_data["items"][0]["available_languages"] == ["ru"]
 
-    # Reject non-Russian search query
+    # Both lang=ru and language=ru -> valid (200)
+    r_search_both_ru = client.get("/api/providers/mangadex/search?q=Chainsaw&lang=ru&language=ru")
+    assert r_search_both_ru.status_code == 200
+
+    # Independent validation: lang=ru, language=en -> 400
+    r_search_ru_en = client.get("/api/providers/mangadex/search?q=Chainsaw&lang=ru&language=en")
+    assert r_search_ru_en.status_code == 400
+    assert "Only Russian language" in r_search_ru_en.json()["detail"]
+
+    # Independent validation: lang=en, language=ru -> 400
+    r_search_en_ru = client.get("/api/providers/mangadex/search?q=Chainsaw&lang=en&language=ru")
+    assert r_search_en_ru.status_code == 400
+    assert "Only Russian language" in r_search_en_ru.json()["detail"]
+
+    # Single invalid lang=en -> 400
     r_search_en = client.get("/api/providers/mangadex/search?q=Chainsaw&lang=en")
     assert r_search_en.status_code == 400
     assert "Only Russian language" in r_search_en.json()["detail"]
@@ -671,7 +871,27 @@ def test_api_routes_providers_integration(mock_mangadex: MangaDexProvider):
     assert "Человек-бензопила" in details_data["alt_titles"]
     assert details_data["available_languages"] == ["ru"]
 
-    # 5. Chapters feed endpoint (Russian enforced, non-Russian rejected)
+    # 5. Chapters feed endpoint (Russian enforced, independent parameter checks)
+    # Absence of parameters -> defaults to 'ru' (200)
+    r_ch_no_params = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters")
+    assert r_ch_no_params.status_code == 200
+    assert r_ch_no_params.json()["total"] == 3
+
+    # Both lang=ru and language=ru -> valid (200)
+    r_ch_both_ru = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=ru&language=ru")
+    assert r_ch_both_ru.status_code == 200
+
+    # Independent validation: lang=ru, language=en -> 400
+    r_ch_ru_en = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=ru&language=en")
+    assert r_ch_ru_en.status_code == 400
+    assert "Only Russian language" in r_ch_ru_en.json()["detail"]
+
+    # Independent validation: lang=en, language=ru -> 400
+    r_ch_en_ru = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=en&language=ru")
+    assert r_ch_en_ru.status_code == 400
+    assert "Only Russian language" in r_ch_en_ru.json()["detail"]
+
+    # Valid lang=ru alone -> 200
     r_ch = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=ru")
     assert r_ch.status_code == 200
     ch_data = r_ch.json()
