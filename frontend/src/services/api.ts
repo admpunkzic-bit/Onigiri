@@ -5,6 +5,8 @@
  * Falls back to http://localhost:8000/api for local development.
  */
 
+import type { MangaItem } from '../types/manga'
+
 const API_BASE_URL: string =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
 
@@ -15,6 +17,12 @@ export interface HealthResponse {
   service: string
   version: string
   timestamp: string
+}
+
+export interface SearchMangaParams {
+  q: string
+  page?: number
+  limit?: number
 }
 
 // ── Error handling ──────────────────────────────────────────
@@ -61,4 +69,19 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 
 export function fetchHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/health')
+}
+
+export async function fetchMangaSearch(params: SearchMangaParams): Promise<MangaItem[]> {
+  const cleanQuery = params.q.trim()
+  if (!cleanQuery) {
+    return []
+  }
+
+  const queryParams = new URLSearchParams({
+    q: cleanQuery,
+    page: String(params.page ?? 1),
+    limit: String(params.limit ?? 20),
+  })
+
+  return request<MangaItem[]>(`/manga/search?${queryParams.toString()}`)
 }
