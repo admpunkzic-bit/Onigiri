@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { useTelegram } from './hooks/useTelegram'
 import MainLayout from './layouts/MainLayout'
 import HomePage from './pages/HomePage'
 import SearchPage from './pages/SearchPage'
@@ -7,6 +8,9 @@ import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
 
 function App() {
+  // Initialize Telegram WebApp integration (ready, expand, viewport, safe-area sync)
+  useTelegram()
+
   return (
     <BrowserRouter>
       <MainLayout>

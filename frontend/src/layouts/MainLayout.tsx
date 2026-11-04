@@ -7,9 +7,20 @@ interface MainLayoutProps {
 
 export default function MainLayout({ children }: MainLayoutProps) {
   return (
-    <div className="flex flex-col h-full bg-bg">
+    <div
+      className="flex flex-col bg-bg min-h-screen"
+      style={{ minHeight: 'var(--app-height, 100dvh)' }}
+    >
       {/* Main content area */}
-      <main className="flex-1 overflow-y-auto pb-20">
+      <main
+        className="flex-1 overflow-y-auto"
+        style={{
+          paddingTop: 'var(--safe-top)',
+          paddingBottom: 'calc(4.5rem + var(--safe-bottom))',
+          paddingLeft: 'var(--safe-left)',
+          paddingRight: 'var(--safe-right)',
+        }}
+      >
         {children}
       </main>
 

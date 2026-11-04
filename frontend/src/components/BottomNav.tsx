@@ -14,7 +14,14 @@ export default function BottomNav() {
   const navigate = useNavigate()
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-surface border-t border-white/5 px-2 py-2 z-50">
+    <nav
+      className="fixed bottom-0 left-0 right-0 bg-surface border-t border-white/5 px-2 pt-2 z-50"
+      style={{
+        paddingBottom: 'calc(0.5rem + var(--safe-bottom))',
+        paddingLeft: 'var(--safe-left)',
+        paddingRight: 'var(--safe-right)',
+      }}
+    >
       <div className="flex justify-around items-center max-w-md mx-auto">
         {navItems.map(({ icon: Icon, label, path }) => {
           const isActive = location.pathname === path

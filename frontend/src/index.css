@@ -10,9 +10,21 @@
   --color-text-secondary: #9295A3;
 }
 
+:root {
+  /* Safe area variables: uses CSS env() with Telegram safeArea / contentSafeArea fallback via max() */
+  --safe-top: max(env(safe-area-inset-top, 0px), var(--tg-content-safe-area-top, var(--tg-safe-area-top, 0px)));
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-content-safe-area-bottom, var(--tg-safe-area-bottom, 0px)));
+  --safe-left: max(env(safe-area-inset-left, 0px), var(--tg-content-safe-area-left, var(--tg-safe-area-left, 0px)));
+  --safe-right: max(env(safe-area-inset-right, 0px), var(--tg-content-safe-area-right, var(--tg-safe-area-right, 0px)));
+
+  /* App height: fallback to 100dvh in modern browsers, or Telegram viewportStableHeight */
+  --app-height: var(--tg-viewport-stable-height, 100dvh);
+}
+
 /* Base reset for mobile Telegram Mini App */
 html, body, #root {
   height: 100%;
+  min-height: var(--app-height, 100dvh);
   margin: 0;
   padding: 0;
   background-color: var(--color-bg);
