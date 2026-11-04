@@ -1,13 +1,15 @@
 """
 API routes for Onigiri backend.
-Includes health check and provider inspection endpoints.
+Includes health check, unified manga catalog endpoints, and provider inspection endpoints.
 """
 
+import sqlite3
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Generator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from database.connection import get_connection
 from providers.base import (
     BaseMangaProvider,
     ProviderChapterItem,
@@ -21,13 +23,24 @@ from providers.base import (
     ProviderSearchResult,
 )
 from providers.registry import ProviderRegistry
+from schemas.manga import MangaDetailRead, MangaListRead
+from services.catalog import CatalogService
 
 router = APIRouter()
 
 
 # ==============================================================================
-# Dependency Injection for Providers
+# Dependency Injection
 # ==============================================================================
+
+def get_db() -> Generator[sqlite3.Connection, None, None]:
+    """Provide a database connection per request with automatic closure."""
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 
 def get_registry(request: Request) -> ProviderRegistry:
     """Retrieve ProviderRegistry from application state."""
@@ -43,6 +56,14 @@ def get_provider(provider_id: str, registry: ProviderRegistry = Depends(get_regi
         return registry.get(provider_id)
     except ProviderNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def get_catalog_service(
+    conn: sqlite3.Connection = Depends(get_db),
+    registry: ProviderRegistry = Depends(get_registry),
+) -> CatalogService:
+    """Dependency provider for CatalogService."""
+    return CatalogService(conn=conn, registry=registry)
 
 
 # ==============================================================================
@@ -61,7 +82,41 @@ async def health_check():
 
 
 # ==============================================================================
-# Provider Endpoints
+# Unified Catalog Endpoints (Onigiri User-Facing API)
+# ==============================================================================
+
+@router.get("/manga/search", response_model=List[MangaListRead])
+async def search_manga(
+    q: str = Query(..., min_length=1, description="Search query string"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Search manga across the unified Onigiri catalog.
+    Queries external Russian-translated sources (MangaDex) and local catalog.
+    Returns unified Onigiri manga cards without exposing provider names.
+    """
+    return await catalog_service.search(query=q, page=page, limit=limit)
+
+
+@router.get("/manga/{id_or_slug}", response_model=MangaDetailRead)
+async def get_manga_detail(
+    id_or_slug: str,
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get full manga details by Onigiri ID or slug.
+    Returns unified manga card. External sources are sanitized/omitted.
+    """
+    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug)
+    if not manga:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    return manga
+
+
+# ==============================================================================
+# Provider Endpoints (Low-Level / Diagnostic)
 # ==============================================================================
 
 def _validate_russian_language_params(lang: Optional[str], language: Optional[str]) -> None:
