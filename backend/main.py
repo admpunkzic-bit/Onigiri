@@ -10,13 +10,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as api_router
 from database.connection import init_db
+from providers.mangadex import MangaDexHttpClient, MangaDexProvider
+from providers.registry import ProviderRegistry
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    """Lifecycle events: initialize database on startup."""
+async def lifespan(app: FastAPI):
+    """Lifecycle events: initialize database and providers on startup, clean shutdown."""
     init_db()
+
+    # Initialize ProviderRegistry and register default providers
+    registry = ProviderRegistry()
+    mangadex_client = MangaDexHttpClient()
+    mangadex_provider = MangaDexProvider(client=mangadex_client)
+    registry.register(mangadex_provider)
+
+    app.state.provider_registry = registry
+
     yield
+
+    # Clean shutdown of all persistent provider HTTP sessions
+    await registry.close_all()
 
 
 app = FastAPI(
