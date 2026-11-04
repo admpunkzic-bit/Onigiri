@@ -130,7 +130,7 @@ def test_migration_idempotency(migrated_db: sqlite3.Connection):
 
     cursor = migrated_db.cursor()
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 3
+    assert cursor.fetchone()[0] == 4
 
 
 # ==============================================================================
@@ -744,3 +744,263 @@ def test_cascade_deletion_manga_sources(migrated_db: sqlite3.Connection):
 
     # Parent manga remains
     assert cursor.execute("SELECT COUNT(*) FROM manga WHERE id = ?", (manga_id,)).fetchone()[0] == 1
+
+
+# ==============================================================================
+# 15. Migration 4 & Schema Compatibility Regression Tests (TASK 007.3)
+# ==============================================================================
+
+def test_migration_004_upgrades_task_007_database(tmp_path: Path):
+    """
+    Verify that an existing database created under TASK 007 (with versions 1, 2, 3
+    and old UNIQUE(manga_id, source_name, source_manga_id)) is safely upgraded
+    by Migration 4 to global UNIQUE(source_name, source_manga_id) with all IDs,
+    chapters, pages, and foreign keys intact.
+    """
+    db_file = tmp_path / "task007_legacy.db"
+    conn = get_connection(db_file)
+    cursor = conn.cursor()
+
+    # 1. Setup exact TASK 007 state: versions 1, 2, 3 applied
+    cursor.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("INSERT INTO schema_migrations VALUES (1, '001_initial_catalog_schema', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (2, '002_sources_authors_genres_chapters', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (3, '003_fts5_search_index', CURRENT_TIMESTAMP)")
+
+    cursor.execute(
+        """
+        CREATE TABLE manga (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            slug TEXT UNIQUE,
+            original_title TEXT,
+            description TEXT,
+            cover_url TEXT,
+            banner_url TEXT,
+            status TEXT NOT NULL DEFAULT 'ongoing',
+            type TEXT NOT NULL DEFAULT 'manga',
+            release_year INTEGER,
+            rating REAL NOT NULL DEFAULT 0.0,
+            views_count INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # Legacy manga_sources with composite UNIQUE including manga_id
+    cursor.execute(
+        """
+        CREATE TABLE manga_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            source_name TEXT NOT NULL,
+            source_manga_id TEXT NOT NULL,
+            source_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_id, source_name, source_manga_id)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE chapters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            manga_source_id INTEGER NOT NULL REFERENCES manga_sources(id) ON DELETE CASCADE,
+            chapter_number REAL NOT NULL,
+            volume_number INTEGER,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_source_id, chapter_number)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE chapter_pages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+            page_number INTEGER NOT NULL,
+            image_url TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chapter_id, page_number)
+        )
+        """
+    )
+
+    # Insert existing rows
+    cursor.execute("INSERT INTO manga (id, title, slug) VALUES (10, 'Legacy Manga', 'legacy-manga')")
+    cursor.execute("INSERT INTO manga (id, title, slug) VALUES (20, 'Second Manga', 'second-manga')")
+    cursor.execute(
+        "INSERT INTO manga_sources (id, manga_id, source_name, source_manga_id, source_url) VALUES (50, 10, 'mangadex', 'md-leg-50', 'http://leg50')",
+    )
+    cursor.execute(
+        "INSERT INTO chapters (id, manga_id, manga_source_id, chapter_number, title) VALUES (500, 10, 50, 1.5, 'Chapter 1.5')",
+    )
+    cursor.execute(
+        "INSERT INTO chapter_pages (id, chapter_id, page_number, image_url) VALUES (5000, 500, 1, 'http://p1.jpg')",
+    )
+    conn.commit()
+
+    # 2. Run migrations (Migration 4 will apply)
+    run_migrations(conn)
+
+    # 3. Assert Migration 4 recorded in schema_migrations
+    cursor.execute("SELECT version FROM schema_migrations WHERE version = 4")
+    assert cursor.fetchone() is not None
+
+    # 4. Assert source row preserved exactly with same ID
+    cursor.execute("SELECT * FROM manga_sources WHERE id = 50")
+    source_row = cursor.fetchone()
+    assert source_row is not None
+    assert source_row["manga_id"] == 10
+    assert source_row["source_manga_id"] == "md-leg-50"
+
+    # 5. Assert chapter and page relations preserved
+    cursor.execute("SELECT * FROM chapters WHERE id = 500")
+    ch_row = cursor.fetchone()
+    assert ch_row is not None
+    assert ch_row["manga_source_id"] == 50
+    assert ch_row["chapter_number"] == 1.5
+
+    cursor.execute("SELECT * FROM chapter_pages WHERE id = 5000")
+    pg_row = cursor.fetchone()
+    assert pg_row is not None
+    assert pg_row["chapter_id"] == 500
+
+    # 6. Assert foreign keys are 100% valid
+    cursor.execute("PRAGMA foreign_key_check")
+    assert cursor.fetchall() == []
+
+    # 7. Assert duplicate external source on different manga is now forbidden
+    with pytest.raises(sqlite3.IntegrityError):
+        cursor.execute(
+            "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (20, 'mangadex', 'md-leg-50')",
+        )
+
+    # 8. Assert trigger prevents updating manga_id when chapters exist
+    with pytest.raises(sqlite3.IntegrityError, match="Cannot update manga_id"):
+        cursor.execute("UPDATE manga_sources SET manga_id = 20 WHERE id = 50")
+
+    # 9. Assert idempotency on second run
+    run_migrations(conn)
+    cursor.execute("SELECT COUNT(*) FROM schema_migrations")
+    assert cursor.fetchone()[0] == 4
+
+    conn.close()
+
+
+def test_migration_004_aborts_safely_on_conflicting_duplicates(tmp_path: Path):
+    """
+    If existing database already has conflicting duplicates of (source_name, source_manga_id),
+    Migration 4 must fail with IntegrityError and rollback cleanly without altering data.
+    """
+    db_file = tmp_path / "conflict_legacy.db"
+    conn = get_connection(db_file)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute("INSERT INTO schema_migrations VALUES (1, '001', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (2, '002', CURRENT_TIMESTAMP)")
+    cursor.execute("INSERT INTO schema_migrations VALUES (3, '003', CURRENT_TIMESTAMP)")
+
+    cursor.execute("CREATE TABLE manga (id INTEGER PRIMARY KEY, title TEXT, slug TEXT UNIQUE)")
+    cursor.execute(
+        """
+        CREATE TABLE manga_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id),
+            source_name TEXT NOT NULL,
+            source_manga_id TEXT NOT NULL,
+            source_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_id, source_name, source_manga_id)
+        )
+        """
+    )
+    cursor.execute("INSERT INTO manga VALUES (1, 'M1', 'm1')")
+    cursor.execute("INSERT INTO manga VALUES (2, 'M2', 'm2')")
+    # Deliberate conflict across two manga
+    cursor.execute("INSERT INTO manga_sources (id, manga_id, source_name, source_manga_id) VALUES (1, 1, 'mangadex', 'md-shared')")
+    cursor.execute("INSERT INTO manga_sources (id, manga_id, source_name, source_manga_id) VALUES (2, 2, 'mangadex', 'md-shared')")
+    conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="duplicate external sources found"):
+        run_migrations(conn)
+
+    # Verify both records still exist unchanged
+    cursor.execute("SELECT COUNT(*) FROM manga_sources")
+    assert cursor.fetchone()[0] == 2
+
+    # Verify version 4 was NOT registered
+    cursor.execute("SELECT version FROM schema_migrations WHERE version = 4")
+    assert cursor.fetchone() is None
+
+    conn.close()
+
+
+def test_seed_detects_conflict_on_foreign_manga(migrated_db: sqlite3.Connection):
+    """
+    seed_data must detect and reject any external source conflict if an ID
+    already belongs to another manga, rather than silently overwriting or ignoring it.
+    """
+    seed_data(migrated_db)
+
+    # Attempt to seed a fake manga reusing onigiri's source ID 'md-onigiri-001'
+    conflicting_manga_data = [
+        {
+            "title": "Conflicting Manga",
+            "slug": "conflicting-manga",
+            "original_title": "Conflict",
+            "description": "Conflict description",
+            "cover_url": None,
+            "banner_url": None,
+            "status": "ongoing",
+            "type": "manga",
+            "release_year": 2024,
+            "rating": 5.0,
+            "views_count": 100,
+            "genres": [],
+            "authors": [],
+            "sources": [
+                {
+                    "source_name": "mangadex",
+                    "source_manga_id": "md-onigiri-001",  # Belongs to onigiri-chronicles!
+                    "source_url": "http://conflict.com",
+                    "chapters": [],
+                }
+            ],
+        }
+    ]
+
+    from services import seed
+    original_sample = seed.SAMPLE_MANGA
+    seed.SAMPLE_MANGA = conflicting_manga_data
+
+    try:
+        with pytest.raises(ValueError, match="Seed conflict: external source"):
+            seed_data(migrated_db)
+    finally:
+        seed.SAMPLE_MANGA = original_sample

@@ -362,11 +362,101 @@ def _migration_003_fts5_search_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_manga_sources_global_unique(conn: sqlite3.Connection) -> None:
+    """
+    Migration 4: Ensure global uniqueness of (source_name, source_manga_id) in manga_sources
+    and install integrity triggers.
+    Safely upgrades existing databases created by TASK 007 without data loss or foreign key breakages.
+    If conflicting duplicate records exist, aborts with IntegrityError for manual resolution.
+    """
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='manga_sources'")
+    row = cursor.fetchone()
+    if not row:
+        return
+    table_sql = row[0]
+
+    norm_sql = re.sub(r"\s+", " ", table_sql)
+    needs_alter = (
+        "UNIQUE(source_name, source_manga_id)" not in norm_sql
+        and "UNIQUE (source_name, source_manga_id)" not in norm_sql
+    )
+
+    if needs_alter:
+        # Check for conflicting duplicates
+        cursor.execute(
+            """
+            SELECT source_name, source_manga_id, COUNT(*) as cnt
+            FROM manga_sources
+            GROUP BY source_name, source_manga_id
+            HAVING cnt > 1
+            """
+        )
+        duplicates = cursor.fetchall()
+        if duplicates:
+            dup_details = [(d[0], d[1], d[2]) for d in duplicates]
+            raise sqlite3.IntegrityError(
+                f"Cannot apply migration 4: duplicate external sources found: {dup_details}. "
+                "Manual resolution required."
+            )
+
+        # Recreate table safely without foreign key cascade to chapters
+        cursor.execute(
+            """
+            CREATE TABLE manga_sources_v4 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+                source_name TEXT NOT NULL,
+                source_manga_id TEXT NOT NULL,
+                source_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_name, source_manga_id)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO manga_sources_v4 (id, manga_id, source_name, source_manga_id, source_url, created_at, updated_at)
+            SELECT id, manga_id, source_name, source_manga_id, source_url, created_at, updated_at
+            FROM manga_sources
+            """
+        )
+
+        cursor.execute("DROP TABLE manga_sources")
+        cursor.execute("ALTER TABLE manga_sources_v4 RENAME TO manga_sources")
+
+        cursor.execute("PRAGMA foreign_key_check")
+        fk_violations = cursor.fetchall()
+        if fk_violations:
+            raise sqlite3.IntegrityError(f"Foreign key check failed after recreation: {fk_violations}")
+
+    # Recreate indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_manga_sources_manga_id ON manga_sources(manga_id)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_manga_sources_lookup ON manga_sources(source_name, source_manga_id)")
+
+    # Recreate trigger preventing updating manga_id if chapters exist
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_manga_sources_manga_id_update
+        BEFORE UPDATE OF manga_id ON manga_sources
+        FOR EACH ROW
+        WHEN NEW.manga_id != OLD.manga_id AND (SELECT COUNT(*) FROM chapters WHERE manga_source_id = OLD.id) > 0
+        BEGIN
+            SELECT RAISE(ABORT, 'Cannot update manga_id: source already has associated chapters');
+        END;
+        """
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
     (2, "002_sources_authors_genres_chapters", _migration_002_sources_authors_genres_chapters),
     (3, "003_fts5_search_index", _migration_003_fts5_search_index),
+    (4, "004_manga_sources_global_unique", _migration_004_manga_sources_global_unique),
 ]
 
 
@@ -375,71 +465,79 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     Run pending migrations sequentially inside transactions.
     Idempotent and safe for existing databases.
     """
-    cursor = conn.cursor()
+    was_fk_on = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+    if was_fk_on:
+        conn.execute("PRAGMA foreign_keys = OFF")
 
-    # Ensure schema_migrations table exists
-    if not conn.in_transaction:
-        conn.execute("BEGIN IMMEDIATE")
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.commit()
-    else:
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
+    try:
+        cursor = conn.cursor()
 
-    # Fetch applied migrations
-    cursor.execute("SELECT version FROM schema_migrations")
-    applied_versions = {row[0] for row in cursor.fetchall()}
-
-    for version, name, migration_fn in MIGRATIONS:
-        if version not in applied_versions:
-            logger.info(f"Applying migration {version}: {name}...")
-
-            started_tx = False
-            use_savepoint = False
-            sp_name = f"migration_{version}"
-
-            if not conn.in_transaction:
-                conn.execute("BEGIN IMMEDIATE")
-                started_tx = True
-            else:
-                conn.execute(f"SAVEPOINT {sp_name}")
-                use_savepoint = True
-
-            try:
-                # Execute migration inside transaction
-                migration_fn(conn)
-                cursor.execute(
-                    "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
-                    (version, name),
+        # Ensure schema_migrations table exists
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-                if use_savepoint:
-                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-                if started_tx:
-                    conn.commit()
-                logger.info(f"Migration {version}: {name} applied successfully.")
-            except Exception as e:
-                if use_savepoint:
-                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
-                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
-                elif started_tx or conn.in_transaction:
-                    conn.rollback()
-                logger.error(f"Migration {version}: {name} failed: {e}")
-                raise
+                """
+            )
+            conn.commit()
+        else:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+        # Fetch applied migrations
+        cursor.execute("SELECT version FROM schema_migrations")
+        applied_versions = {row[0] for row in cursor.fetchall()}
+
+        for version, name, migration_fn in MIGRATIONS:
+            if version not in applied_versions:
+                logger.info(f"Applying migration {version}: {name}...")
+
+                started_tx = False
+                use_savepoint = False
+                sp_name = f"migration_{version}"
+
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                    started_tx = True
+                else:
+                    conn.execute(f"SAVEPOINT {sp_name}")
+                    use_savepoint = True
+
+                try:
+                    # Execute migration inside transaction
+                    migration_fn(conn)
+                    cursor.execute(
+                        "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+                        (version, name),
+                    )
+                    if use_savepoint:
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    if started_tx:
+                        conn.commit()
+                    logger.info(f"Migration {version}: {name} applied successfully.")
+                except Exception as e:
+                    if use_savepoint:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    elif started_tx or conn.in_transaction:
+                        conn.rollback()
+                    logger.error(f"Migration {version}: {name} failed: {e}")
+                    raise
+    finally:
+        if was_fk_on:
+            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def search_manga(

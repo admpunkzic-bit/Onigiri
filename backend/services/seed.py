@@ -319,23 +319,36 @@ def seed_data(conn: sqlite3.Connection) -> None:
 
         # 6. Insert Manga Sources & Chapters
         for source_info in manga_data.get("sources", []):
+            s_name = source_info["source_name"]
+            s_manga_id = source_info["source_manga_id"]
+            s_url = source_info.get("source_url")
+
+            # Check if source already exists
             cursor.execute(
-                """
-                INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
-                    source_url = excluded.source_url,
-                    updated_at = CURRENT_TIMESTAMP
-                RETURNING id
-                """,
-                (
-                    manga_id,
-                    source_info["source_name"],
-                    source_info["source_manga_id"],
-                    source_info.get("source_url"),
-                ),
+                "SELECT id, manga_id FROM manga_sources WHERE source_name = ? AND source_manga_id = ?",
+                (s_name, s_manga_id),
             )
-            manga_source_id = cursor.fetchone()["id"]
+            existing_source = cursor.fetchone()
+            if existing_source is not None:
+                if existing_source["manga_id"] != manga_id:
+                    raise ValueError(
+                        f"Seed conflict: external source '{s_name}:{s_manga_id}' already belongs to manga id={existing_source['manga_id']}, cannot link to manga id={manga_id}"
+                    )
+                cursor.execute(
+                    "UPDATE manga_sources SET source_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (s_url, existing_source["id"]),
+                )
+                manga_source_id = existing_source["id"]
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                    VALUES (?, ?, ?, ?)
+                    RETURNING id
+                    """,
+                    (manga_id, s_name, s_manga_id, s_url),
+                )
+                manga_source_id = cursor.fetchone()["id"]
 
             # Insert chapters for this source
             for ch in source_info.get("chapters", []):
