@@ -323,7 +323,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
                 """
                 INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(manga_id, source_name, source_manga_id) DO UPDATE SET
+                ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
                     source_url = excluded.source_url,
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING id

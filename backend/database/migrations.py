@@ -163,12 +163,12 @@ def _migration_002_sources_authors_genres_chapters(conn: sqlite3.Connection) -> 
             source_url TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(manga_id, source_name, source_manga_id)
+            UNIQUE(source_name, source_manga_id)
         )
         """
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_manga_sources_manga_id ON manga_sources(manga_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_manga_sources_lookup ON manga_sources(source_name, source_manga_id)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_manga_sources_lookup ON manga_sources(source_name, source_manga_id)")
 
     # 2. authors
     cursor.execute(
@@ -277,6 +277,19 @@ def _migration_002_sources_authors_genres_chapters(conn: sqlite3.Connection) -> 
         """
     )
 
+    # Prevent updating manga_sources.manga_id if chapters already exist for this source
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_manga_sources_manga_id_update
+        BEFORE UPDATE OF manga_id ON manga_sources
+        FOR EACH ROW
+        WHEN NEW.manga_id != OLD.manga_id AND (SELECT COUNT(*) FROM chapters WHERE manga_source_id = OLD.id) > 0
+        BEGIN
+            SELECT RAISE(ABORT, 'Cannot update manga_id: source already has associated chapters');
+        END;
+        """
+    )
+
 
 def _migration_003_fts5_search_index(conn: sqlite3.Connection) -> None:
     """
@@ -365,16 +378,28 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     cursor = conn.cursor()
 
     # Ensure schema_migrations table exists
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        conn.commit()
+    else:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
     # Fetch applied migrations
     cursor.execute("SELECT version FROM schema_migrations")
@@ -383,6 +408,18 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     for version, name, migration_fn in MIGRATIONS:
         if version not in applied_versions:
             logger.info(f"Applying migration {version}: {name}...")
+
+            started_tx = False
+            use_savepoint = False
+            sp_name = f"migration_{version}"
+
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+                started_tx = True
+            else:
+                conn.execute(f"SAVEPOINT {sp_name}")
+                use_savepoint = True
+
             try:
                 # Execute migration inside transaction
                 migration_fn(conn)
@@ -390,10 +427,17 @@ def run_migrations(conn: sqlite3.Connection) -> None:
                     "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
                     (version, name),
                 )
-                conn.commit()
+                if use_savepoint:
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                if started_tx:
+                    conn.commit()
                 logger.info(f"Migration {version}: {name} applied successfully.")
             except Exception as e:
-                conn.rollback()
+                if use_savepoint:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                elif started_tx or conn.in_transaction:
+                    conn.rollback()
                 logger.error(f"Migration {version}: {name} failed: {e}")
                 raise
 

@@ -463,3 +463,284 @@ def test_domain_models_and_schemas(migrated_db: sqlite3.Connection):
     )
     assert manga_detail.sources[0].source_name == "mangadex"
     assert manga_detail.chapters[0].chapter_number == 2.5
+
+
+# ==============================================================================
+# 11. Transactionality & Full Rollback on Migration Failure (ISS-02)
+# ==============================================================================
+
+def test_migration_transaction_rollback_on_failure(tmp_path: Path):
+    """
+    Ensure that when a migration fails, all DDL (tables, indexes, triggers)
+    and DML statements are completely rolled back, and version is not recorded.
+    """
+    from database import migrations
+
+    db_file = tmp_path / "rollback_test.db"
+    conn = get_connection(db_file)
+
+    def failing_migration(connection: sqlite3.Connection):
+        connection.execute("CREATE TABLE deliberate_table (id INTEGER PRIMARY KEY, note TEXT)")
+        connection.execute("CREATE INDEX idx_deliberate ON deliberate_table(note)")
+        connection.execute(
+            """
+            CREATE TRIGGER trg_deliberate AFTER INSERT ON deliberate_table
+            BEGIN
+                SELECT 1;
+            END;
+            """
+        )
+        # Deliberately raise an unhandled exception midway
+        raise RuntimeError("Simulated failure in migration execution")
+
+    # Temporarily append faulty migration to MIGRATIONS
+    faulty_version = 999
+    original_migrations = list(migrations.MIGRATIONS)
+    migrations.MIGRATIONS.append((faulty_version, "999_failing_migration", failing_migration))
+
+    try:
+        with pytest.raises(RuntimeError, match="Simulated failure"):
+            run_migrations(conn)
+
+        cursor = conn.cursor()
+
+        # 1. Verify deliberate_table was rolled back and does not exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='deliberate_table'")
+        assert cursor.fetchone() is None
+
+        # 2. Verify idx_deliberate does not exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_deliberate'")
+        assert cursor.fetchone() is None
+
+        # 3. Verify trg_deliberate does not exist
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_deliberate'")
+        assert cursor.fetchone() is None
+
+        # 4. Verify version was NOT recorded in schema_migrations
+        cursor.execute("SELECT version FROM schema_migrations WHERE version = ?", (faulty_version,))
+        assert cursor.fetchone() is None
+
+    finally:
+        migrations.MIGRATIONS = original_migrations
+        conn.close()
+
+
+def test_migration_recovery_after_simulated_fault(tmp_path: Path):
+    """
+    Ensure the database can recover and successfully apply migrations
+    after a previously failed migration attempt.
+    """
+    from database import migrations
+
+    db_file = tmp_path / "recovery_test.db"
+    conn = get_connection(db_file)
+
+    step = {"should_fail": True}
+
+    def intermittent_migration(connection: sqlite3.Connection):
+        connection.execute("CREATE TABLE recovered_table (id INTEGER PRIMARY KEY, title TEXT)")
+        if step["should_fail"]:
+            raise RuntimeError("Temporary migration failure")
+
+    test_version = 888
+    original_migrations = list(migrations.MIGRATIONS)
+    migrations.MIGRATIONS.append((test_version, "888_intermittent_migration", intermittent_migration))
+
+    try:
+        # First attempt: fails
+        with pytest.raises(RuntimeError):
+            run_migrations(conn)
+
+        # Assert table does not exist
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recovered_table'")
+        assert cur.fetchone() is None
+
+        # Fix the issue: second attempt succeeds
+        step["should_fail"] = False
+        run_migrations(conn)
+
+        # Assert table now exists and version is registered
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='recovered_table'")
+        assert cur.fetchone() is not None
+        cur.execute("SELECT version FROM schema_migrations WHERE version = ?", (test_version,))
+        assert cur.fetchone() is not None
+
+        # Idempotency check: rerun once more
+        run_migrations(conn)
+
+    finally:
+        migrations.MIGRATIONS = original_migrations
+        conn.close()
+
+
+# ==============================================================================
+# 12. Manga Sources Integrity & Cannot Update manga_id (ISS-01)
+# ==============================================================================
+
+def test_manga_sources_manga_id_cannot_be_updated_when_chapters_exist(migrated_db: sqlite3.Connection):
+    """
+    Ensure manga_sources.manga_id cannot be reassigned to another manga
+    when chapters are already associated with this source.
+    """
+    cursor = migrated_db.cursor()
+
+    # 1. Create two manga
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Manga 1', 'manga-1') RETURNING id")
+    m1_id = cursor.fetchone()["id"]
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Manga 2', 'manga-2') RETURNING id")
+    m2_id = cursor.fetchone()["id"]
+
+    # 2. Create source for Manga 1
+    cursor.execute(
+        "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (?, 'src1', 's1') RETURNING id",
+        (m1_id,),
+    )
+    src_id = cursor.fetchone()["id"]
+
+    # 3. Create chapter for this source
+    cursor.execute(
+        "INSERT INTO chapters (manga_id, manga_source_id, chapter_number, title) VALUES (?, ?, 1.0, 'Ch 1')",
+        (m1_id, src_id),
+    )
+    migrated_db.commit()
+
+    # 4. Attempt to update manga_sources.manga_id = m2_id while chapter exists -> Must FAIL
+    with pytest.raises(sqlite3.IntegrityError, match="Cannot update manga_id"):
+        cursor.execute("UPDATE manga_sources SET manga_id = ? WHERE id = ?", (m2_id, src_id))
+
+    # Verify original manga_id remains unchanged
+    cursor.execute("SELECT manga_id FROM manga_sources WHERE id = ?", (src_id,))
+    assert cursor.fetchone()["manga_id"] == m1_id
+
+    # 5. Remove chapter, then update manga_id -> Must SUCCEED
+    cursor.execute("DELETE FROM chapters WHERE manga_source_id = ?", (src_id,))
+    migrated_db.commit()
+
+    cursor.execute("UPDATE manga_sources SET manga_id = ? WHERE id = ?", (m2_id, src_id))
+    migrated_db.commit()
+
+    cursor.execute("SELECT manga_id FROM manga_sources WHERE id = ?", (src_id,))
+    assert cursor.fetchone()["manga_id"] == m2_id
+
+
+# ==============================================================================
+# 13. Global Uniqueness of External Sources (ISS-03)
+# ==============================================================================
+
+def test_manga_sources_global_uniqueness(migrated_db: sqlite3.Connection):
+    """
+    Ensure the same external (source_name, source_manga_id) cannot be linked
+    to two different manga.
+    """
+    cursor = migrated_db.cursor()
+
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Manga A', 'manga-a') RETURNING id")
+    m_a_id = cursor.fetchone()["id"]
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Manga B', 'manga-b') RETURNING id")
+    m_b_id = cursor.fetchone()["id"]
+
+    # Insert source for Manga A
+    cursor.execute(
+        "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (?, 'mangadex', 'md-unique-123')",
+        (m_a_id,),
+    )
+    migrated_db.commit()
+
+    # Attempt to insert same source for Manga B -> Must FAIL
+    with pytest.raises(sqlite3.IntegrityError):
+        cursor.execute(
+            "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (?, 'mangadex', 'md-unique-123')",
+            (m_b_id,),
+        )
+
+
+# ==============================================================================
+# 14. Cascade Deletion Tests (ISS-04)
+# ==============================================================================
+
+def test_cascade_deletion_manga(migrated_db: sqlite3.Connection):
+    """
+    Deleting a manga must cascade delete related sources, chapters, pages,
+    manga_authors, and manga_genres, but must preserve global authors and genres.
+    """
+    cursor = migrated_db.cursor()
+
+    # 1. Setup entities
+    cursor.execute("INSERT INTO authors (name) VALUES ('Test Author') RETURNING id")
+    author_id = cursor.fetchone()["id"]
+    cursor.execute("INSERT INTO genres (name, slug) VALUES ('Test Genre', 'test-genre') RETURNING id")
+    genre_id = cursor.fetchone()["id"]
+
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Cascade Manga', 'cascade-manga') RETURNING id")
+    manga_id = cursor.fetchone()["id"]
+
+    cursor.execute("INSERT INTO manga_authors (manga_id, author_id) VALUES (?, ?)", (manga_id, author_id))
+    cursor.execute("INSERT INTO manga_genres (manga_id, genre_id) VALUES (?, ?)", (manga_id, genre_id))
+
+    cursor.execute(
+        "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (?, 'src_casc', 'sc-1') RETURNING id",
+        (manga_id,),
+    )
+    src_id = cursor.fetchone()["id"]
+
+    cursor.execute(
+        "INSERT INTO chapters (manga_id, manga_source_id, chapter_number) VALUES (?, ?, 1.0) RETURNING id",
+        (manga_id, src_id),
+    )
+    chapter_id = cursor.fetchone()["id"]
+
+    cursor.execute("INSERT INTO chapter_pages (chapter_id, page_number, image_url) VALUES (?, 1, 'http://p1.png')", (chapter_id,))
+    migrated_db.commit()
+
+    # 2. Delete the manga
+    cursor.execute("DELETE FROM manga WHERE id = ?", (manga_id,))
+    migrated_db.commit()
+
+    # 3. Assert all child links/records are deleted
+    assert cursor.execute("SELECT COUNT(*) FROM manga_sources WHERE manga_id = ?", (manga_id,)).fetchone()[0] == 0
+    assert cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,)).fetchone()[0] == 0
+    assert cursor.execute("SELECT COUNT(*) FROM chapter_pages WHERE chapter_id = ?", (chapter_id,)).fetchone()[0] == 0
+    assert cursor.execute("SELECT COUNT(*) FROM manga_authors WHERE manga_id = ?", (manga_id,)).fetchone()[0] == 0
+    assert cursor.execute("SELECT COUNT(*) FROM manga_genres WHERE manga_id = ?", (manga_id,)).fetchone()[0] == 0
+
+    # 4. Assert master entities still exist
+    assert cursor.execute("SELECT COUNT(*) FROM authors WHERE id = ?", (author_id,)).fetchone()[0] == 1
+    assert cursor.execute("SELECT COUNT(*) FROM genres WHERE id = ?", (genre_id,)).fetchone()[0] == 1
+
+
+def test_cascade_deletion_manga_sources(migrated_db: sqlite3.Connection):
+    """
+    Deleting a manga_source must cascade delete chapters and pages,
+    while keeping the parent manga intact.
+    """
+    cursor = migrated_db.cursor()
+
+    cursor.execute("INSERT INTO manga (title, slug) VALUES ('Source Cascade', 'src-cascade') RETURNING id")
+    manga_id = cursor.fetchone()["id"]
+
+    cursor.execute(
+        "INSERT INTO manga_sources (manga_id, source_name, source_manga_id) VALUES (?, 'src_del', 'sd-1') RETURNING id",
+        (manga_id,),
+    )
+    src_id = cursor.fetchone()["id"]
+
+    cursor.execute(
+        "INSERT INTO chapters (manga_id, manga_source_id, chapter_number) VALUES (?, ?, 1.0) RETURNING id",
+        (manga_id, src_id),
+    )
+    chapter_id = cursor.fetchone()["id"]
+
+    cursor.execute("INSERT INTO chapter_pages (chapter_id, page_number, image_url) VALUES (?, 1, 'http://p1.png')", (chapter_id,))
+    migrated_db.commit()
+
+    # Delete source
+    cursor.execute("DELETE FROM manga_sources WHERE id = ?", (src_id,))
+    migrated_db.commit()
+
+    # Chapters and pages deleted
+    assert cursor.execute("SELECT COUNT(*) FROM chapters WHERE id = ?", (chapter_id,)).fetchone()[0] == 0
+    assert cursor.execute("SELECT COUNT(*) FROM chapter_pages WHERE chapter_id = ?", (chapter_id,)).fetchone()[0] == 0
+
+    # Parent manga remains
+    assert cursor.execute("SELECT COUNT(*) FROM manga WHERE id = ?", (manga_id,)).fetchone()[0] == 1
