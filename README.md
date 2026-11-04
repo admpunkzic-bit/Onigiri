@@ -11,6 +11,8 @@ Onigiri — удобное приложение для поиска, просм�
 ```
 Onigiri/
 ├── frontend/               # React + TypeScript + Vite
+│   ├── Dockerfile          # Production multi-stage Nginx build
+│   ├── nginx.conf          # Конфигурация Nginx для SPA
 │   └── src/
 │       ├── components/     # UI-компоненты
 │       ├── pages/          # Страницы приложения
@@ -20,6 +22,7 @@ Onigiri/
 │       ├── store/          # Управление состоянием
 │       └── styles/         # Стили
 ├── backend/                # Python + FastAPI
+│   ├── Dockerfile          # Production Python container
 │   ├── api/                # Роуты API
 │   ├── models/             # Модели данных
 │   ├── schemas/            # Pydantic-схемы
@@ -27,6 +30,8 @@ Onigiri/
 │   ├── database/           # Подключение к БД (SQLite)
 │   └── tests/              # Тесты
 ├── docs/                   # Документация
+├── docker-compose.yml      # Корневая конфигурация Docker Compose
+├── DEPLOYMENT.md           # Руководство по развёртыванию
 ├── README.md
 └── .gitignore
 ```
@@ -35,10 +40,11 @@ Onigiri/
 
 | Слой | Стек |
 |------|------|
-| Frontend | React, TypeScript, Vite, Tailwind CSS, Lucide React |
-| Backend | Python, FastAPI, SQLite |
+| Frontend | React, TypeScript, Vite, Tailwind CSS, Lucide React, Nginx |
+| Backend | Python, FastAPI, SQLite, Uvicorn |
+| DevOps | Docker, Docker Compose, Nginx Proxy Manager |
 
-## Установка и запуск
+## Установка и запуск (Local Development)
 
 ### Требования
 
@@ -89,6 +95,16 @@ curl http://localhost:8000/api/health
   "timestamp": "2026-01-01T00:00:00+00:00"
 }
 ```
+
+## Production-развёртывание (Docker Compose)
+
+Проект полностью контейнеризирован и готов к запуску через Docker Compose:
+
+```bash
+docker compose up -d --build
+```
+
+Подробные инструкции по настройке переменных окружения, сети `vaultwarden_proxy`, Nginx Proxy Manager и резервному копированию SQLite см. в [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Тесты
 

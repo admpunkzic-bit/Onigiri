@@ -1,0 +1,39 @@
+services:
+  frontend:
+    container_name: onigiri-frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: https://api-onigiri.punk.uz/api
+    restart: unless-stopped
+    networks:
+      - vaultwarden_proxy
+
+  backend:
+    container_name: onigiri-backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - SQLITE_DB_PATH=/app/data/onigiri.db
+      - CORS_ORIGINS=https://onigiri.punk.uz
+    volumes:
+      - onigiri_db_data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - vaultwarden_proxy
+
+volumes:
+  onigiri_db_data:
+    name: onigiri_db_data
+
+networks:
+  vaultwarden_proxy:
+    external: true
