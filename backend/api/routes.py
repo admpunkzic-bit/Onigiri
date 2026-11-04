@@ -76,13 +76,19 @@ async def search_provider(
     q: str = Query(..., min_length=1, description="Search query string"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
-    lang: Optional[str] = Query(None, description="Optional language filter, e.g. 'ru'"),
+    lang: Optional[str] = Query(None, description="Translation language filter (must be 'ru' if provided)"),
+    language: Optional[str] = Query(None, description="Translation language filter (must be 'ru' if provided)"),
     provider: BaseMangaProvider = Depends(get_provider),
 ):
-    """Search manga across an external provider."""
+    """Search manga across an external provider (strictly restricted to Russian translations)."""
+    requested_lang = language or lang
+    if requested_lang is not None and requested_lang.strip().lower() != "ru":
+        raise HTTPException(
+            status_code=400,
+            detail="Only Russian language ('ru') is supported in Onigiri",
+        )
     try:
-        languages = [lang] if lang else None
-        return await provider.search(query=q, page=page, limit=limit, languages=languages)
+        return await provider.search(query=q, page=page, limit=limit, languages=["ru"])
     except ProviderRateLimitError as exc:
         headers = {"Retry-After": str(int(exc.retry_after))} if exc.retry_after else None
         raise HTTPException(status_code=429, detail=str(exc), headers=headers) from exc
@@ -119,16 +125,23 @@ async def get_manga_details(
 async def get_manga_chapters(
     provider_id: str,
     provider_manga_id: str,
-    lang: str = Query("ru", description="Translation language filter (default 'ru')"),
+    lang: Optional[str] = Query(None, description="Translation language filter (must be 'ru' if provided)"),
+    language: Optional[str] = Query(None, description="Translation language filter (must be 'ru' if provided)"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(100, ge=1, le=100, description="Items per page"),
     provider: BaseMangaProvider = Depends(get_provider),
 ):
-    """Get paginated chapter feed for a manga in requested language."""
+    """Get paginated chapter feed for a manga (strictly Russian translations only)."""
+    requested_lang = language or lang
+    if requested_lang is not None and requested_lang.strip().lower() != "ru":
+        raise HTTPException(
+            status_code=400,
+            detail="Only Russian language ('ru') is supported in Onigiri",
+        )
     try:
         return await provider.get_chapters(
             provider_manga_id=provider_manga_id,
-            language=lang,
+            language="ru",
             page=page,
             limit=limit,
         )

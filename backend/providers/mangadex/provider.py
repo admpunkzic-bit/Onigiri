@@ -11,6 +11,8 @@ from providers.base import (
     ProviderChapterItem,
     ProviderChaptersResult,
     ProviderMangaItem,
+    ProviderNetworkError,
+    ProviderNotFoundError,
     ProviderPageItem,
     ProviderPagesResult,
     ProviderSearchResult,
@@ -130,6 +132,10 @@ class MangaDexProvider(BaseMangaProvider):
         genres = self._parse_genres(attrs)
         cover_url = self._parse_cover_url(manga_id, rels)
 
+        raw_avail = attrs.get("availableTranslatedLanguages") or []
+        # Onigiri only exposes Russian content
+        supported_langs = ["ru"] if ("ru" in raw_avail or not raw_avail) else []
+
         return ProviderMangaItem(
             provider_id=self.provider_id,
             provider_manga_id=manga_id,
@@ -142,7 +148,7 @@ class MangaDexProvider(BaseMangaProvider):
             authors=authors,
             artists=artists,
             genres=genres,
-            available_languages=attrs.get("availableTranslatedLanguages") or [],
+            available_languages=supported_langs,
             source_url=f"https://mangadex.org/title/{manga_id}",
         )
 
@@ -157,7 +163,12 @@ class MangaDexProvider(BaseMangaProvider):
         limit: int = 20,
         languages: Optional[List[str]] = None,
     ) -> ProviderSearchResult:
-        """Search manga on MangaDex with pagination."""
+        """Search manga on MangaDex with pagination, strictly filtering for Russian translations."""
+        if languages:
+            for lang in languages:
+                if lang != "ru":
+                    raise ValueError(f"Language '{lang}' is not supported. Onigiri only supports 'ru'.")
+
         safe_page = max(1, page)
         safe_limit = max(1, min(100, limit))
         offset = (safe_page - 1) * safe_limit
@@ -166,17 +177,26 @@ class MangaDexProvider(BaseMangaProvider):
             title=query,
             limit=safe_limit,
             offset=offset,
-            languages=languages,
+            languages=["ru"],
         )
 
         data_list = raw.get("data") or []
         total = int(raw.get("total", len(data_list)))
-        items = [self._build_manga_item(item) for item in data_list]
+
+        # Defense-in-depth: exclude works without available Russian translation
+        filtered_items: List[ProviderMangaItem] = []
+        for item in data_list:
+            item_attrs = item.get("attributes") or {}
+            avail_langs = item_attrs.get("availableTranslatedLanguages") or []
+            if avail_langs and "ru" not in avail_langs:
+                continue
+            filtered_items.append(self._build_manga_item(item))
+
         has_next = (offset + safe_limit) < total
 
         return ProviderSearchResult(
             provider_id=self.provider_id,
-            items=items,
+            items=filtered_items,
             total=total,
             page=safe_page,
             limit=safe_limit,
@@ -184,9 +204,16 @@ class MangaDexProvider(BaseMangaProvider):
         )
 
     async def get_manga_details(self, provider_manga_id: str) -> ProviderMangaItem:
-        """Fetch details for a single manga."""
+        """Fetch details for a single manga, verifying Russian translation availability."""
         raw = await self._client.get_manga(provider_manga_id)
-        return self._build_manga_item(raw["data"])
+        data = raw.get("data") or {}
+        attrs = data.get("attributes") or {}
+        avail_langs = attrs.get("availableTranslatedLanguages") or []
+        if avail_langs and "ru" not in avail_langs:
+            raise ProviderNotFoundError(
+                f"Manga '{provider_manga_id}' has no Russian translation available in Onigiri."
+            )
+        return self._build_manga_item(data)
 
     async def get_chapters(
         self,
@@ -196,9 +223,12 @@ class MangaDexProvider(BaseMangaProvider):
         limit: int = 100,
     ) -> ProviderChaptersResult:
         """
-        Fetch paginated chapter feed for a manga in requested language.
+        Fetch paginated chapter feed for a manga strictly in Russian language.
         Preserves raw numbering and accurately calculates numeric chapter values.
         """
+        if language != "ru":
+            raise ValueError(f"Language '{language}' is not supported. Onigiri only supports 'ru'.")
+
         safe_page = max(1, page)
         safe_limit = max(1, min(100, limit))
         offset = (safe_page - 1) * safe_limit
@@ -207,7 +237,7 @@ class MangaDexProvider(BaseMangaProvider):
             manga_id=provider_manga_id,
             limit=safe_limit,
             offset=offset,
-            language=language,
+            language="ru",
         )
 
         chapter_entries = raw.get("data") or []
@@ -271,7 +301,7 @@ class MangaDexProvider(BaseMangaProvider):
                     is_special=is_special,
                     volume_number=volume_num,
                     title=attrs.get("title"),
-                    language=attrs.get("translatedLanguage", language),
+                    language="ru",
                     scanlation_group=scanlation_group,
                     published_at=published_at,
                 )
@@ -297,10 +327,16 @@ class MangaDexProvider(BaseMangaProvider):
         """
         Fetch page image URLs for a chapter using MangaDex@Home.
         Does not invent expiration timestamps: expires_at is None.
+        Enforces valid HTTPS baseUrl.
         """
         raw = await self._client.get_at_home_server(provider_chapter_id)
 
         base_url = raw.get("baseUrl")
+        if not base_url or not isinstance(base_url, str) or not base_url.startswith("https://"):
+            raise ProviderNetworkError(
+                f"Insecure or invalid baseUrl received from MangaDex@Home: {base_url}"
+            )
+
         ch_dict = raw.get("chapter") or {}
         ch_hash = ch_dict.get("hash")
 

@@ -127,9 +127,12 @@ class MangaDexHttpClient:
             ("includes[]", "author"),
             ("includes[]", "artist"),
         ]
-        if languages:
-            for lang in languages:
-                params.append(("availableTranslatedLanguage[]", lang))
+        # Onigiri strictly requires Russian content ('ru')
+        langs = languages if languages is not None else ["ru"]
+        for lang in langs:
+            if lang != "ru":
+                raise ValueError(f"Language '{lang}' is not supported. Onigiri only supports 'ru'.")
+            params.append(("availableTranslatedLanguage[]", "ru"))
 
         return await self._request("GET", "/manga", params=params)
 
@@ -149,11 +152,13 @@ class MangaDexHttpClient:
         offset: int = 0,
         language: str = "ru",
     ) -> Dict[str, Any]:
-        """Get chapters feed for a manga in requested language with scanlation groups."""
+        """Get chapters feed for a manga strictly in Russian language."""
+        if language != "ru":
+            raise ValueError(f"Language '{language}' is not supported. Onigiri only supports 'ru'.")
         params = [
             ("limit", str(limit)),
             ("offset", str(offset)),
-            ("translatedLanguage[]", language),
+            ("translatedLanguage[]", "ru"),
             ("order[chapter]", "asc"),
             ("includes[]", "scanlation_group"),
         ]

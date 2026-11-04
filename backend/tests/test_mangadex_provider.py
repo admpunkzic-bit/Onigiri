@@ -86,6 +86,30 @@ MOCK_SEARCH_PAYLOAD = {
     "total": 1,
 }
 
+MOCK_MANGA_NO_RU = {
+    "id": "english-only-manga-id",
+    "type": "manga",
+    "attributes": {
+        "title": {"en": "English Only Manga"},
+        "altTitles": [],
+        "description": {"en": "Only in English"},
+        "status": "ongoing",
+        "year": 2023,
+        "availableTranslatedLanguages": ["en", "ja"],
+        "tags": [],
+    },
+    "relationships": [],
+}
+
+MOCK_SEARCH_WITH_MIXED_LANGUAGES = {
+    "result": "ok",
+    "response": "collection",
+    "data": [MOCK_MANGA_PAYLOAD["data"], MOCK_MANGA_NO_RU],
+    "limit": 20,
+    "offset": 0,
+    "total": 2,
+}
+
 MOCK_EMPTY_SEARCH_PAYLOAD = {
     "result": "ok",
     "response": "collection",
@@ -171,17 +195,29 @@ def mock_mangadex():
         path = request.url.path
 
         if path == "/manga" and request.method == "GET":
+            # Assert query params enforce availableTranslatedLanguage[]=ru
+            ru_langs = request.url.params.get_list("availableTranslatedLanguage[]")
+            if "ru" not in ru_langs:
+                return httpx.Response(400, json={"errors": [{"status": 400, "detail": "Missing Russian language filter"}]})
+
             query = request.url.params.get("title", "")
             if "empty" in query:
                 return httpx.Response(200, json=MOCK_EMPTY_SEARCH_PAYLOAD)
+            if "mixed" in query:
+                return httpx.Response(200, json=MOCK_SEARCH_WITH_MIXED_LANGUAGES)
             return httpx.Response(200, json=MOCK_SEARCH_PAYLOAD)
 
         if path == "/manga/not-found-id":
             return httpx.Response(404, json={"errors": [{"status": 404, "detail": "Manga not found"}]})
 
         if path.startswith("/manga/") and path.endswith("/feed"):
-            lang = request.url.params.get("translatedLanguage[]", "ru")
-            if lang == "fr":
+            # Assert translatedLanguage[]=ru is strictly passed
+            feed_langs = request.url.params.get_list("translatedLanguage[]")
+            if "ru" not in feed_langs:
+                return httpx.Response(400, json={"errors": [{"status": 400, "detail": "Only Russian is allowed"}]})
+
+            manga_id = path.split("/")[2]
+            if manga_id == "no-ru-chapters-id":
                 return httpx.Response(200, json=MOCK_EMPTY_SEARCH_PAYLOAD)
             return httpx.Response(200, json=MOCK_CHAPTERS_PAYLOAD)
 
@@ -228,6 +264,24 @@ async def test_search_success(mock_mangadex: MangaDexProvider):
     assert "Supernatural" in item.genres
     assert item.cover_url == "https://uploads.mangadex.org/covers/e896c48c-3150-437d-ba57-d8567eb399ae/chainsaw-cover.jpg.512.jpg"
     assert item.source_url == "https://mangadex.org/title/e896c48c-3150-437d-ba57-d8567eb399ae"
+    assert item.available_languages == ["ru"]
+
+
+@pytest.mark.anyio
+async def test_search_filters_out_manga_without_russian_translation(mock_mangadex: MangaDexProvider):
+    """Ensure search results do not return titles that lack Russian translations."""
+    res = await mock_mangadex.search(query="mixed query", page=1, limit=10)
+    assert res.total == 2
+    # Only the manga with Russian translation is retained
+    assert len(res.items) == 1
+    assert res.items[0].provider_manga_id == "e896c48c-3150-437d-ba57-d8567eb399ae"
+
+
+@pytest.mark.anyio
+async def test_search_rejects_non_russian_language(mock_mangadex: MangaDexProvider):
+    """Direct provider call rejects non-ru language filter."""
+    with pytest.raises(ValueError, match="Onigiri only supports 'ru'"):
+        await mock_mangadex.search(query="Chainsaw", languages=["en"])
 
 
 @pytest.mark.anyio
@@ -248,7 +302,7 @@ async def test_get_manga_details_success(mock_mangadex: MangaDexProvider):
     assert manga.provider_manga_id == "e896c48c-3150-437d-ba57-d8567eb399ae"
     assert manga.title == "Chainsaw Man"
     assert manga.release_year == 2018
-    assert "ru" in manga.available_languages
+    assert manga.available_languages == ["ru"]
 
 
 # ==============================================================================
@@ -267,6 +321,7 @@ async def test_get_chapters_ru_success(mock_mangadex: MangaDexProvider):
     assert ch1.chapter_number_numeric == 1.0
     assert ch1.is_special is False
     assert ch1.volume_number == 1
+    assert ch1.language == "ru"
     assert ch1.title == "Пёс и бензопила"
     assert ch1.scanlation_group == "Manga Translators Gang"
     assert isinstance(ch1.published_at, datetime)
@@ -287,8 +342,16 @@ async def test_get_chapters_ru_success(mock_mangadex: MangaDexProvider):
 
 
 @pytest.mark.anyio
+async def test_get_chapters_rejects_non_russian_language(mock_mangadex: MangaDexProvider):
+    """Direct provider call rejects non-ru language parameter."""
+    with pytest.raises(ValueError, match="Onigiri only supports 'ru'"):
+        await mock_mangadex.get_chapters("e896c48c-3150-437d-ba57-d8567eb399ae", language="en")
+
+
+@pytest.mark.anyio
 async def test_get_chapters_no_translations(mock_mangadex: MangaDexProvider):
-    res = await mock_mangadex.get_chapters("e896c48c-3150-437d-ba57-d8567eb399ae", language="fr")
+    """When no Russian translations exist for manga feed."""
+    res = await mock_mangadex.get_chapters("no-ru-chapters-id", language="ru")
     assert res.total == 0
     assert len(res.chapters) == 0
 
@@ -320,6 +383,27 @@ async def test_get_chapter_pages_data_saver(mock_mangadex: MangaDexProvider):
     p1 = res.pages[0]
     assert p1.page_number == 1
     assert p1.image_url == "https://node.mangadex.network/data-saver/abc123hash/page1.jpg"
+
+
+@pytest.mark.anyio
+async def test_get_chapter_pages_rejects_insecure_or_invalid_base_url():
+    """Verify that insecure (HTTP) or missing baseUrl is rejected with ProviderNetworkError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "result": "ok",
+                "baseUrl": "http://insecure.node.network",  # Insecure HTTP
+                "chapter": {"hash": "abc", "data": ["p1.jpg"]},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = MangaDexHttpClient(client=httpx.AsyncClient(transport=transport), min_request_interval=0.0)
+    provider = MangaDexProvider(client=client)
+
+    with pytest.raises(ProviderNetworkError, match="Insecure or invalid baseUrl"):
+        await provider.get_chapter_pages("ch-1-id")
 
 
 # ==============================================================================
@@ -429,6 +513,52 @@ async def test_provider_registry_lifecycle():
 
 
 @pytest.mark.anyio
+async def test_provider_registry_rejects_duplicate_registration():
+    """Verify that registering a provider with an existing ID raises ValueError and does not overwrite."""
+    registry = ProviderRegistry()
+
+    class DummyProvider(BaseMangaProvider):
+        @property
+        def provider_id(self) -> str:
+            return "same_id"
+
+        @property
+        def name(self) -> str:
+            return "First"
+
+        async def search(self, *args, **kwargs): pass
+        async def get_manga_details(self, *args, **kwargs): pass
+        async def get_chapters(self, *args, **kwargs): pass
+        async def get_chapter_pages(self, *args, **kwargs): pass
+        async def close(self): pass
+
+    class DuplicateProvider(BaseMangaProvider):
+        @property
+        def provider_id(self) -> str:
+            return "same_id"
+
+        @property
+        def name(self) -> str:
+            return "Second"
+
+        async def search(self, *args, **kwargs): pass
+        async def get_manga_details(self, *args, **kwargs): pass
+        async def get_chapters(self, *args, **kwargs): pass
+        async def get_chapter_pages(self, *args, **kwargs): pass
+        async def close(self): pass
+
+    first = DummyProvider()
+    second = DuplicateProvider()
+
+    registry.register(first)
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(second)
+
+    # Confirm original provider remains untouched
+    assert registry.get("same_id").name == "First"
+
+
+@pytest.mark.anyio
 async def test_provider_registry_close_isolates_exceptions():
     """Ensure that an error in one provider's close() does not prevent others from closing."""
     registry = ProviderRegistry()
@@ -512,18 +642,26 @@ def test_api_routes_providers_integration(mock_mangadex: MangaDexProvider):
     assert r_health.status_code == 200
     assert r_health.json()["status"] == "ok"
 
-    # 2. List providers
+    # 2. List providers (only Russian language exposed)
     r_list = client.get("/api/providers")
     assert r_list.status_code == 200
     providers = r_list.json()["providers"]
     assert any(p["id"] == "mangadex" for p in providers)
+    for p in providers:
+        assert p.get("languages") == ["ru"]
 
-    # 3. Search endpoint
+    # 3. Search endpoint (Russian enforced, non-Russian rejected)
     r_search = client.get("/api/providers/mangadex/search?q=Chainsaw")
     assert r_search.status_code == 200
     search_data = r_search.json()
     assert search_data["total"] == 1
     assert search_data["items"][0]["title"] == "Chainsaw Man"
+    assert search_data["items"][0]["available_languages"] == ["ru"]
+
+    # Reject non-Russian search query
+    r_search_en = client.get("/api/providers/mangadex/search?q=Chainsaw&lang=en")
+    assert r_search_en.status_code == 400
+    assert "Only Russian language" in r_search_en.json()["detail"]
 
     # 4. Manga details endpoint
     r_details = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae")
@@ -531,15 +669,27 @@ def test_api_routes_providers_integration(mock_mangadex: MangaDexProvider):
     details_data = r_details.json()
     assert details_data["title"] == "Chainsaw Man"
     assert "Человек-бензопила" in details_data["alt_titles"]
+    assert details_data["available_languages"] == ["ru"]
 
-    # 5. Chapters feed endpoint
+    # 5. Chapters feed endpoint (Russian enforced, non-Russian rejected)
     r_ch = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=ru")
     assert r_ch.status_code == 200
     ch_data = r_ch.json()
     assert ch_data["total"] == 3
     assert ch_data["chapters"][0]["chapter_number_raw"] == "1"
+    assert ch_data["chapters"][0]["language"] == "ru"
     assert ch_data["chapters"][1]["chapter_number_numeric"] == 1.5
     assert ch_data["chapters"][2]["is_special"] is True
+
+    # Reject non-Russian chapter query via lang=en
+    r_ch_en = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?lang=en")
+    assert r_ch_en.status_code == 400
+    assert "Only Russian language" in r_ch_en.json()["detail"]
+
+    # Reject non-Russian chapter query via language=en
+    r_ch_en2 = client.get("/api/providers/mangadex/manga/e896c48c-3150-437d-ba57-d8567eb399ae/chapters?language=en")
+    assert r_ch_en2.status_code == 400
+    assert "Only Russian language" in r_ch_en2.json()["detail"]
 
     # 6. Chapter pages endpoint
     r_pg = client.get("/api/providers/mangadex/chapters/ch-1-id/pages?data_saver=true")

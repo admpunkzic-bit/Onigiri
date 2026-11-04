@@ -5,7 +5,7 @@ Managed within FastAPI lifecycle (startup/shutdown) without global mutable state
 
 import asyncio
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from providers.base import BaseMangaProvider, ProviderNotFoundError
 
@@ -22,7 +22,9 @@ class ProviderRegistry:
         self._providers: Dict[str, BaseMangaProvider] = {}
 
     def register(self, provider: BaseMangaProvider) -> None:
-        """Register a new provider instance."""
+        """Register a new provider instance. Disallows duplicate registration."""
+        if provider.provider_id in self._providers:
+            raise ValueError(f"Provider '{provider.provider_id}' is already registered")
         self._providers[provider.provider_id] = provider
         logger.info(f"Registered provider '{provider.provider_id}' ({provider.name})")
 
@@ -36,10 +38,14 @@ class ProviderRegistry:
         """Check if provider with given ID is registered."""
         return provider_id in self._providers
 
-    def list_providers(self) -> List[Dict[str, str]]:
-        """Return list of registered provider summaries."""
+    def list_providers(self) -> List[Dict[str, Any]]:
+        """Return list of registered provider summaries with supported languages."""
         return [
-            {"id": p.provider_id, "name": p.name}
+            {
+                "id": p.provider_id,
+                "name": p.name,
+                "languages": getattr(p, "supported_languages", ["ru"]),
+            }
             for p in self._providers.values()
         ]
 

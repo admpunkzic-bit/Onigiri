@@ -164,6 +164,11 @@ class BaseMangaProvider(ABC):
         """Human-readable provider name (e.g. 'MangaDex')."""
         pass
 
+    @property
+    def supported_languages(self) -> List[str]:
+        """Languages supported in Onigiri (strictly ['ru'])."""
+        return ["ru"]
+
     @abstractmethod
     async def search(
         self,
