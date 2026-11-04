@@ -7,7 +7,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Generator, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+import httpx
 
 from database.connection import get_connection
 from providers.base import (
@@ -98,6 +99,36 @@ async def search_manga(
     Returns unified Onigiri manga cards without exposing provider names.
     """
     return await catalog_service.search(query=q, page=page, limit=limit)
+
+
+@router.get("/manga/cover/proxy")
+async def get_manga_cover(
+    url: str = Query(..., description="External cover image URL"),
+):
+    """
+    Safely proxy external manga covers to bypass MangaDex anti-hotlinking bot-challenge (HTTP 403).
+    Restricted strictly to authorized MangaDex CDN hosts.
+    """
+    clean_url = url.strip()
+    if not clean_url.startswith("https://uploads.mangadex.org/"):
+        raise HTTPException(status_code=400, detail="Invalid cover URL: host not permitted")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(clean_url, headers={"User-Agent": "Onigiri-App/1.0"})
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail="Failed to load cover from remote host")
+
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            return Response(
+                content=resp.content,
+                media_type=content_type,
+                headers={
+                    "Cache-Control": "public, max-age=604800, immutable",
+                },
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Remote network error: {exc}")
 
 
 @router.get("/manga/{id_or_slug}", response_model=MangaDetailRead)

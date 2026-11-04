@@ -451,3 +451,43 @@ def test_api_manga_detail_not_found():
         resp = client.get("/api/manga/definitely-not-found-slug-99999")
         assert resp.status_code == 404
         assert resp.json()["detail"] == "Manga not found"
+
+
+def test_api_manga_cover_proxy_disallowed_host():
+    """Verify GET /api/manga/cover/proxy rejects non-whitelisted hosts with HTTP 400."""
+    with TestClient(app) as client:
+        resp = client.get("/api/manga/cover/proxy", params={"url": "https://evil.com/malicious.jpg"})
+        assert resp.status_code == 400
+        assert "not permitted" in resp.json()["detail"]
+
+
+def test_api_manga_cover_proxy_success(monkeypatch):
+    """Verify GET /api/manga/cover/proxy successfully proxies valid MangaDex covers."""
+    class MockResponse:
+        status_code = 200
+        content = b"fake-jpeg-bytes"
+        headers = {"content-type": "image/jpeg"}
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, headers=None):
+            return MockResponse()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClient)
+
+    with TestClient(app) as client:
+        valid_url = "https://uploads.mangadex.org/covers/dummy/cover.jpg.512.jpg"
+        resp = client.get("/api/manga/cover/proxy", params={"url": valid_url})
+        assert resp.status_code == 200
+        assert resp.content == b"fake-jpeg-bytes"
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert "max-age" in resp.headers["cache-control"]

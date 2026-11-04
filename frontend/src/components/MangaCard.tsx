@@ -7,6 +7,17 @@ interface MangaCardProps {
   manga: MangaItem
 }
 
+function resolveCoverUrl(url?: string | null): string | null {
+  if (!url) return null
+  // MangaDex blocks direct browser requests with 403 Bot challenge.
+  // Route MangaDex covers through the safe Onigiri backend proxy.
+  if (url.startsWith('https://uploads.mangadex.org/')) {
+    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
+    return `${apiBase}/manga/cover/proxy?url=${encodeURIComponent(url)}`
+  }
+  return url
+}
+
 export default function MangaCard({ manga }: MangaCardProps) {
   const [imageError, setImageError] = useState(false)
 
@@ -20,6 +31,7 @@ export default function MangaCard({ manga }: MangaCardProps) {
 
   const primaryAuthor = manga.authors?.[0]?.name
   const statusText = statusLabels[manga.status?.toLowerCase()] || null
+  const coverSrc = resolveCoverUrl(manga.cover_url)
 
   return (
     <Link
@@ -28,11 +40,12 @@ export default function MangaCard({ manga }: MangaCardProps) {
     >
       {/* Cover image container */}
       <div className="relative aspect-[3/4] w-full bg-white/5 overflow-hidden">
-        {manga.cover_url && !imageError ? (
+        {coverSrc && !imageError ? (
           <img
-            src={manga.cover_url}
+            src={coverSrc}
             alt={manga.title}
             loading="lazy"
+            referrerPolicy="no-referrer"
             onError={() => setImageError(true)}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
           />
