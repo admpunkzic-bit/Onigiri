@@ -74,7 +74,7 @@ export default function VerticalReader({
       <div className="w-full max-w-2xl space-y-2">
         {pages.map((p) => (
           <PageImage
-            key={p.page_number}
+            key={`${p.page_number}-${p.image_url}`}
             src={p.image_url}
             alt={`Страница ${p.page_number}`}
             pageNumber={p.page_number}

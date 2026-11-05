@@ -126,13 +126,23 @@ export function syncMangaChapters(
   )
 }
 
-export function fetchChapterPages(
+export async function fetchChapterPages(
   idOrSlug: string,
   chapterId: number
 ): Promise<ChapterReaderDetail> {
-  return request<ChapterReaderDetail>(
+  const data = await request<ChapterReaderDetail>(
     `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters/${chapterId}/pages`
   )
+  const baseUrl = (API_BASE_URL || 'http://localhost:8000/api').replace(/\/api\/?$/, '')
+  return {
+    ...data,
+    pages: data.pages.map((p) => ({
+      ...p,
+      image_url: p.image_url.startsWith('http')
+        ? p.image_url
+        : `${baseUrl}${p.image_url.startsWith('/') ? '' : '/'}${p.image_url}`,
+    })),
+  }
 }
 
 export async function fetchReadingProgress(

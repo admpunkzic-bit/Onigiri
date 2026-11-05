@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 
 interface PageImageProps {
@@ -19,6 +19,13 @@ export default function PageImage({
   const [error, setError] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
 
+  // Reset state when image source changes
+  useEffect(() => {
+    setLoading(true)
+    setError(false)
+    setRetryCount(0)
+  }, [src])
+
   const handleRetry = (e: React.MouseEvent) => {
     e.stopPropagation()
     setError(false)
@@ -27,7 +34,12 @@ export default function PageImage({
   }
 
   // Add retry bust query if retrying
-  const currentSrc = retryCount > 0 ? `${src}?retry=${retryCount}` : src
+  const currentSrc =
+    retryCount > 0
+      ? src.includes('?')
+        ? `${src}&retry=${retryCount}`
+        : `${src}?retry=${retryCount}`
+      : src
 
   return (
     <div

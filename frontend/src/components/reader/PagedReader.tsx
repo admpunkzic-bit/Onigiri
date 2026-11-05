@@ -120,7 +120,7 @@ export default function PagedReader({
     >
       <div className="w-full max-w-2xl mx-auto flex items-center justify-center">
         <PageImage
-          key={activePage.page_number}
+          key={`${activePage.page_number}-${activePage.image_url}`}
           src={activePage.image_url}
           alt={`Страница ${activePage.page_number}`}
           pageNumber={activePage.page_number}
