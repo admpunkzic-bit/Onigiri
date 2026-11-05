@@ -238,7 +238,7 @@ class ReaderService:
             chapter_id=ch_row["id"],
             manga_id=manga_id,
             manga_title=manga_title,
-            chapter_number=float(ch_row["chapter_number"]),
+            chapter_number=float(ch_row["chapter_number"]) if ch_row["chapter_number"] is not None else None,
             volume_number=ch_row["volume_number"],
             title=ch_row["title"],
             scanlation_group=ch_row["scanlation_group"],
@@ -345,7 +345,7 @@ class ReaderService:
         return ReadingProgressRead(
             manga_id=row["manga_id"],
             chapter_id=row["chapter_id"],
-            chapter_number=float(row["chapter_number"]),
+            chapter_number=float(row["chapter_number"]) if row["chapter_number"] is not None else None,
             chapter_title=row["chapter_title"],
             page_number=row["page_number"],
             total_pages=row["total_pages"],

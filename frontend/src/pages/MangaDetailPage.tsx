@@ -47,6 +47,11 @@ function formatDate(dateStr?: string | null): string {
   }
 }
 
+function formatChapterNumber(num: number | null | undefined): string | null {
+  if (num === null || num === undefined) return null
+  return String(num)
+}
+
 export default function MangaDetailPage() {
   const { idOrSlug } = useParams<{ idOrSlug: string }>()
   const navigate = useNavigate()
@@ -110,11 +115,11 @@ export default function MangaDetailPage() {
     } catch {
       // Fallback: client-side sort
       setChapters((prev) =>
-        [...prev].sort((a, b) =>
-          nextOrder === 'asc'
-            ? a.chapter_number - b.chapter_number
-            : b.chapter_number - a.chapter_number
-        )
+        [...prev].sort((a, b) => {
+          const numA = a.chapter_number ?? 0
+          const numB = b.chapter_number ?? 0
+          return nextOrder === 'asc' ? numA - numB : numB - numA
+        })
       )
     }
   }
@@ -308,40 +313,76 @@ export default function MangaDetailPage() {
             )}
 
             {/* Action Button: Continue / Start Reading */}
-            {chapters.length > 0 && (
-              <div className="mb-4">
-                {progress ? (
-                  <button
-                    onClick={() =>
-                      navigate(
-                        `/manga/${manga.slug || manga.id}/chapter/${progress.chapter_id}`
-                      )
-                    }
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
-                  >
-                    <BookOpen size={16} />
-                    <span>
-                      Продолжить: Глава {progress.chapter_number} (стр. {progress.page_number})
-                    </span>
-                  </button>
-                ) : (
+            {chapters.length > 0 && (() => {
+              if (progress) {
+                // Authoritative chapter from loaded catalog list
+                const currentChapter = chapters.find((c) => c.id === progress.chapter_id)
+                const chNumber = currentChapter?.chapter_number !== undefined
+                  ? currentChapter.chapter_number
+                  : progress.chapter_number
+                const chTitle = currentChapter?.title || progress.chapter_title
+
+                let continueLabel = 'Продолжить чтение'
+                if (chNumber !== null && chNumber !== undefined) {
+                  continueLabel = `Продолжить: Глава ${formatChapterNumber(chNumber)}`
+                } else if (chTitle && chTitle.trim()) {
+                  continueLabel = `Продолжить: ${chTitle.trim()}`
+                }
+
+                if (progress.page_number && progress.page_number > 0) {
+                  continueLabel += ` (стр. ${progress.page_number})`
+                }
+
+                return (
+                  <div className="mb-4">
+                    <button
+                      onClick={() =>
+                        navigate(
+                          `/manga/${manga.slug || manga.id}/chapter/${progress.chapter_id}`
+                        )
+                      }
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
+                    >
+                      <BookOpen size={16} />
+                      <span>{continueLabel}</span>
+                    </button>
+                  </div>
+                )
+              }
+
+              // No progress: Start reading button
+              const sorted = [...chapters].sort(
+                (a, b) => (a.chapter_number ?? 0) - (b.chapter_number ?? 0)
+              )
+              const firstChapter = sorted[0] || chapters[0]
+
+              let startLabel = 'Начать читать'
+              if (firstChapter) {
+                if (firstChapter.chapter_number !== null && firstChapter.chapter_number !== undefined) {
+                  startLabel = `Начать читать (Глава ${formatChapterNumber(firstChapter.chapter_number)})`
+                } else if (firstChapter.title && firstChapter.title.trim()) {
+                  startLabel = `Начать читать (${firstChapter.title.trim()})`
+                }
+              }
+
+              return (
+                <div className="mb-4">
                   <button
                     onClick={() => {
-                      const sorted = [...chapters].sort((a, b) => a.chapter_number - b.chapter_number)
-                      navigate(
-                        `/manga/${manga.slug || manga.id}/chapter/${sorted[0]?.id || chapters[0].id}`
-                      )
+                      if (firstChapter) {
+                        navigate(
+                          `/manga/${manga.slug || manga.id}/chapter/${firstChapter.id}`
+                        )
+                      }
                     }}
                     className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
                   >
                     <BookOpen size={16} />
-                    <span>
-                      Начать читать (Глава {chapters[0]?.chapter_number || 1})
-                    </span>
+                    <span>{startLabel}</span>
                   </button>
-                )}
-              </div>
-            )}
+                </div>
+              )
+            })()}
           </div>
 
           {/* Description */}

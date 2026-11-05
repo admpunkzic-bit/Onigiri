@@ -171,7 +171,13 @@ export async function fetchReadingProgress(
 
 export async function saveReadingProgress(
   idOrSlug: string,
-  update: { chapter_id: number; page_number: number; total_pages?: number | null }
+  update: {
+    chapter_id: number
+    chapter_number?: number | null
+    chapter_title?: string | null
+    page_number: number
+    total_pages?: number | null
+  }
 ): Promise<ReadingProgress | null> {
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
 
@@ -180,7 +186,8 @@ export async function saveReadingProgress(
     const localRecord: ReadingProgress = {
       manga_id: 0,
       chapter_id: update.chapter_id,
-      chapter_number: 0,
+      chapter_number: update.chapter_number ?? null,
+      chapter_title: update.chapter_title ?? null,
       page_number: update.page_number,
       total_pages: update.total_pages,
       updated_at: new Date().toISOString(),
@@ -198,7 +205,11 @@ export async function saveReadingProgress(
       `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`,
       {
         method: 'POST',
-        body: JSON.stringify(update),
+        body: JSON.stringify({
+          chapter_id: update.chapter_id,
+          page_number: update.page_number,
+          total_pages: update.total_pages,
+        }),
       }
     )
   } catch (err) {

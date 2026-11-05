@@ -109,6 +109,8 @@ export default function ReaderPage() {
     saveTimerRef.current = window.setTimeout(() => {
       saveReadingProgress(idOrSlug, {
         chapter_id: detail.chapter_id,
+        chapter_number: detail.chapter_number,
+        chapter_title: detail.title,
         page_number: currentPage,
         total_pages: detail.total_pages,
       })

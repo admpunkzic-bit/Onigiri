@@ -71,7 +71,7 @@ class ChapterPageRead(ChapterPageBase):
 # ==========================================
 
 class ChapterBase(BaseModel):
-    chapter_number: float = Field(..., ge=0)
+    chapter_number: Optional[float] = Field(default=None, ge=0)
     volume_number: Optional[int] = Field(None, ge=0)
     title: Optional[str] = None
     source_chapter_id: Optional[str] = None
@@ -199,7 +199,7 @@ class ChapterReaderDetailRead(BaseModel):
     chapter_id: int
     manga_id: int
     manga_title: str
-    chapter_number: float
+    chapter_number: Optional[float] = None
     volume_number: Optional[int] = None
     title: Optional[str] = None
     scanlation_group: Optional[str] = None
@@ -218,7 +218,7 @@ class ReadingProgressUpdate(BaseModel):
 class ReadingProgressRead(BaseModel):
     manga_id: int
     chapter_id: int
-    chapter_number: float
+    chapter_number: Optional[float] = None
     chapter_title: Optional[str] = None
     page_number: int
     total_pages: Optional[int] = None

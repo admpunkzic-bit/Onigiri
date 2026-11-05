@@ -9,7 +9,7 @@ import {
 interface ReaderToolbarProps {
   visible: boolean
   mangaTitle: string
-  chapterNumber: number
+  chapterNumber?: number | null
   chapterTitle?: string | null
   currentPage: number
   totalPages: number
@@ -38,6 +38,12 @@ export default function ReaderToolbar({
   onPrevChapter,
   onNextChapter,
 }: ReaderToolbarProps) {
+  const hasChapterNum = chapterNumber !== null && chapterNumber !== undefined
+  const formattedNumber = hasChapterNum ? String(chapterNumber) : null
+  const headerHeading = formattedNumber !== null
+    ? `Глава ${formattedNumber}${chapterTitle ? ` — ${chapterTitle}` : ''}`
+    : (chapterTitle || 'Чтение')
+
   return (
     <>
       {/* Top Bar */}
@@ -58,8 +64,7 @@ export default function ReaderToolbar({
             </button>
             <div className="min-w-0">
               <h1 className="text-xs font-semibold text-text-primary truncate">
-                Глава {chapterNumber}
-                {chapterTitle ? ` — ${chapterTitle}` : ''}
+                {headerHeading}
               </h1>
               <p className="text-[10px] text-text-secondary truncate">
                 {mangaTitle}

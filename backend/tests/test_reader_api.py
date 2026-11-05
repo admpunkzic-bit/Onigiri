@@ -318,3 +318,76 @@ def test_reading_progress_save_and_retrieve_with_telegram_auth(test_db_with_chap
         assert r_update.status_code == 200
         assert r_update.json()["chapter_id"] == 902
         assert r_update.json()["page_number"] == 1
+        assert r_update.json()["chapter_number"] == 2.0
+
+
+def test_reading_progress_fractional_chapter(test_db_with_chapters, monkeypatch):
+    bot_token = "test_bot_token_fractional"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", bot_token)
+    user_init = make_telegram_init_data(user_id=888, username="fractional_reader", bot_token=bot_token)
+
+    # Insert a fractional chapter 0.5
+    cursor = test_db_with_chapters.cursor()
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO chapters (
+            id, manga_id, manga_source_id, source_chapter_id, chapter_number, volume_number, title, language
+        )
+        VALUES (903, 999, 999, 'md-ch-903', 0.5, 1, 'Prologue Part 2', 'ru')
+        """
+    )
+    test_db_with_chapters.commit()
+
+    with TestClient(app) as client:
+        # Save progress on chapter 903 (0.5)
+        res = client.post(
+            "/api/manga/reader-test-manga/progress",
+            headers={"Authorization": f"Telegram {user_init}"},
+            json={"chapter_id": 903, "page_number": 5, "total_pages": 15},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["chapter_id"] == 903
+        assert data["chapter_number"] == 0.5
+        assert data["chapter_title"] == "Prologue Part 2"
+        assert data["page_number"] == 5
+
+        # Retrieve and verify preserved fractional number
+        get_res = client.get(
+            "/api/manga/reader-test-manga/progress",
+            headers={"Authorization": f"Telegram {user_init}"},
+        )
+        assert get_res.status_code == 200
+        get_data = get_res.json()
+        assert get_data["chapter_number"] == 0.5
+        assert get_data["chapter_id"] == 903
+
+
+def test_schemas_support_unnumbered_chapter():
+    from schemas.manga import ReadingProgressRead, ChapterReaderDetailRead
+
+    # ReadingProgressRead with None chapter_number must not raise validation error
+    prog = ReadingProgressRead(
+        manga_id=999,
+        chapter_id=904,
+        chapter_number=None,
+        chapter_title="Special One-shot",
+        page_number=1,
+        total_pages=10,
+        updated_at="2026-11-06T00:00:00Z",
+    )
+    assert prog.chapter_number is None
+    assert prog.chapter_title == "Special One-shot"
+
+    # ChapterReaderDetailRead with None chapter_number must not raise validation error
+    detail = ChapterReaderDetailRead(
+        chapter_id=904,
+        manga_id=999,
+        manga_title="Test Manga",
+        chapter_number=None,
+        title="Special One-shot",
+        total_pages=1,
+        pages=[],
+    )
+    assert detail.chapter_number is None
+    assert detail.title == "Special One-shot"

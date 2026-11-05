@@ -34,7 +34,7 @@ export interface ChapterItem {
   id: number
   manga_id: number
   source_chapter_id?: string | null
-  chapter_number: number
+  chapter_number?: number | null
   volume_number?: number | null
   title?: string | null
   language?: string
@@ -57,7 +57,7 @@ export interface ChapterReaderDetail {
   chapter_id: number
   manga_id: number
   manga_title: string
-  chapter_number: number
+  chapter_number?: number | null
   volume_number?: number | null
   title?: string | null
   scanlation_group?: string | null
@@ -70,7 +70,7 @@ export interface ChapterReaderDetail {
 export interface ReadingProgress {
   manga_id: number
   chapter_id: number
-  chapter_number: number
+  chapter_number?: number | null
   chapter_title?: string | null
   page_number: number
   total_pages?: number | null
