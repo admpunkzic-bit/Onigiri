@@ -131,7 +131,7 @@ def test_migration_idempotency(migrated_db: sqlite3.Connection):
 
     cursor = migrated_db.cursor()
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 5
+    assert cursor.fetchone()[0] == 6
 
 
 # ==============================================================================
@@ -899,7 +899,7 @@ def test_migration_004_upgrades_task_007_database(tmp_path: Path):
     # 9. Assert idempotency on second run
     run_migrations(conn)
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 5
+    assert cursor.fetchone()[0] == 6
 
     conn.close()
 

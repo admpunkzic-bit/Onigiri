@@ -184,3 +184,42 @@ class MangaDetailRead(MangaListRead):
     chapters: List[ChapterRead] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Reader & Reading Progress Schemas (TASK 012)
+# ==========================================
+
+class ChapterReaderPageItem(BaseModel):
+    page_number: int
+    image_url: str
+
+
+class ChapterReaderDetailRead(BaseModel):
+    chapter_id: int
+    manga_id: int
+    manga_title: str
+    chapter_number: float
+    volume_number: Optional[int] = None
+    title: Optional[str] = None
+    scanlation_group: Optional[str] = None
+    total_pages: int
+    pages: List[ChapterReaderPageItem] = []
+    prev_chapter_id: Optional[int] = None
+    next_chapter_id: Optional[int] = None
+
+
+class ReadingProgressUpdate(BaseModel):
+    chapter_id: int
+    page_number: int = Field(default=1, ge=1)
+    total_pages: Optional[int] = None
+
+
+class ReadingProgressRead(BaseModel):
+    manga_id: int
+    chapter_id: int
+    chapter_number: float
+    chapter_title: Optional[str] = None
+    page_number: int
+    total_pages: Optional[int] = None
+    updated_at: str

@@ -4,6 +4,7 @@ import MainLayout from './layouts/MainLayout'
 import HomePage from './pages/HomePage'
 import SearchPage from './pages/SearchPage'
 import MangaDetailPage from './pages/MangaDetailPage'
+import ReaderPage from './pages/ReaderPage'
 import LibraryPage from './pages/LibraryPage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
@@ -19,6 +20,7 @@ function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/manga/:idOrSlug" element={<MangaDetailPage />} />
+          <Route path="/manga/:idOrSlug/chapter/:chapterId" element={<ReaderPage />} />
           <Route path="/library" element={<LibraryPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />

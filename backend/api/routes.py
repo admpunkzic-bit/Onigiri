@@ -24,8 +24,17 @@ from providers.base import (
     ProviderSearchResult,
 )
 from providers.registry import ProviderRegistry
-from schemas.manga import ChapterRead, MangaDetailRead, MangaListRead
+from api.auth import require_telegram_user
+from schemas.manga import (
+    ChapterRead,
+    ChapterReaderDetailRead,
+    MangaDetailRead,
+    MangaListRead,
+    ReadingProgressRead,
+    ReadingProgressUpdate,
+)
 from services.catalog import CatalogService
+from services.reader import ReaderService
 
 router = APIRouter()
 
@@ -65,6 +74,14 @@ def get_catalog_service(
 ) -> CatalogService:
     """Dependency provider for CatalogService."""
     return CatalogService(conn=conn, registry=registry)
+
+
+def get_reader_service(
+    conn: sqlite3.Connection = Depends(get_db),
+    registry: ProviderRegistry = Depends(get_registry),
+) -> ReaderService:
+    """Dependency provider for ReaderService."""
+    return ReaderService(conn=conn, registry=registry)
 
 
 # ==============================================================================
@@ -181,6 +198,81 @@ async def sync_manga_chapters_endpoint(
         "manga_id": manga.id,
         "chapters_count": len(chapters),
     }
+
+
+# ==============================================================================
+# Reader & Reading Progress Endpoints (TASK 012)
+# ==============================================================================
+
+@router.get("/manga/{id_or_slug}/chapters/{chapter_id}/pages", response_model=ChapterReaderDetailRead)
+async def get_chapter_reader_pages(
+    id_or_slug: str,
+    chapter_id: int,
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Get reader metadata, ordered pages list, and adjacent chapter navigation pointers.
+    All page images use internal Onigiri backend endpoints (/api/manga/chapters/{id}/pages/{n}).
+    """
+    return await reader_service.get_chapter_reader_detail(id_or_slug, chapter_id)
+
+
+@router.get("/manga/chapters/{chapter_id}/pages/{page_number}")
+async def get_page_image(
+    chapter_id: int,
+    page_number: int,
+    data_saver: bool = Query(False, description="Use dataSaver compressed image"),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Securely stream a specific chapter page image via backend.
+    SSRF-protected, forbids redirects, hides external provider domains.
+    """
+    image_bytes, content_type = await reader_service.get_page_image_stream(
+        chapter_id=chapter_id,
+        page_number=page_number,
+        data_saver=data_saver,
+    )
+    return Response(
+        content=image_bytes,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+        },
+    )
+
+
+@router.get("/manga/{id_or_slug}/progress", response_model=Optional[ReadingProgressRead])
+async def get_reading_progress(
+    id_or_slug: str,
+    user: dict = Depends(require_telegram_user),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Get reading progress for a verified Telegram user on a given manga.
+    Requires cryptographically verified Telegram initData.
+    """
+    return reader_service.get_user_progress(str(user["id"]), id_or_slug)
+
+
+@router.post("/manga/{id_or_slug}/progress", response_model=ReadingProgressRead)
+async def save_reading_progress(
+    id_or_slug: str,
+    progress: ReadingProgressUpdate,
+    user: dict = Depends(require_telegram_user),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Save reading progress (chapter and page) for a verified Telegram user.
+    Requires cryptographically verified Telegram initData.
+    """
+    return reader_service.save_user_progress(
+        user_id=str(user["id"]),
+        id_or_slug=id_or_slug,
+        chapter_id=progress.chapter_id,
+        page_number=progress.page_number,
+        total_pages=progress.total_pages,
+    )
 
 
 # ==============================================================================

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useLocation } from 'react-router-dom'
 import BottomNav from '../components/BottomNav'
 
 interface MainLayoutProps {
@@ -6,6 +7,9 @@ interface MainLayoutProps {
 }
 
 export default function MainLayout({ children }: MainLayoutProps) {
+  const location = useLocation()
+  const isReaderPage = location.pathname.includes('/chapter/')
+
   return (
     <div
       className="flex flex-col bg-bg min-h-screen"
@@ -15,17 +19,19 @@ export default function MainLayout({ children }: MainLayoutProps) {
       <main
         className="flex-1 overflow-y-auto"
         style={{
-          paddingTop: 'var(--safe-top)',
-          paddingBottom: 'calc(4.5rem + var(--safe-bottom))',
-          paddingLeft: 'var(--safe-left)',
-          paddingRight: 'var(--safe-right)',
+          paddingTop: isReaderPage ? '0px' : 'var(--safe-top)',
+          paddingBottom: isReaderPage
+            ? 'var(--safe-bottom)'
+            : 'calc(4.5rem + var(--safe-bottom))',
+          paddingLeft: isReaderPage ? '0px' : 'var(--safe-left)',
+          paddingRight: isReaderPage ? '0px' : 'var(--safe-right)',
         }}
       >
         {children}
       </main>
 
-      {/* Bottom navigation */}
-      <BottomNav />
+      {/* Bottom navigation (hidden in reader mode) */}
+      {!isReaderPage && <BottomNav />}
     </div>
   )
 }

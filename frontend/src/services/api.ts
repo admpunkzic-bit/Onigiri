@@ -5,7 +5,13 @@
  * Falls back to http://localhost:8000/api for local development.
  */
 
-import type { ChapterItem, MangaDetail, MangaItem } from '../types/manga'
+import type {
+  ChapterItem,
+  ChapterReaderDetail,
+  MangaDetail,
+  MangaItem,
+  ReadingProgress,
+} from '../types/manga'
 
 const API_BASE_URL: string =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
@@ -49,10 +55,21 @@ export class NetworkError extends Error {
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   let response: Response
 
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string>),
+  }
+
+  // Forward Telegram WebApp initData for cryptographically verified auth
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (tgInitData && tgInitData.trim().length > 0) {
+    headers['Authorization'] = `Telegram ${tgInitData.trim()}`
+  }
+
   try {
     response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      headers,
     })
   } catch {
     throw new NetworkError()
@@ -107,4 +124,84 @@ export function syncMangaChapters(
     `/manga/${encodeURIComponent(idOrSlug.trim())}/sync`,
     { method: 'POST' }
   )
+}
+
+export function fetchChapterPages(
+  idOrSlug: string,
+  chapterId: number
+): Promise<ChapterReaderDetail> {
+  return request<ChapterReaderDetail>(
+    `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters/${chapterId}/pages`
+  )
+}
+
+export async function fetchReadingProgress(
+  idOrSlug: string
+): Promise<ReadingProgress | null> {
+  // If not in Telegram (Guest mode in browser), fetch from localStorage
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    try {
+      const raw = localStorage.getItem(`onigiri_guest_progress_${idOrSlug.trim()}`)
+      if (raw) return JSON.parse(raw) as ReadingProgress
+    } catch {
+      // Ignore localStorage errors
+    }
+    return null
+  }
+
+  try {
+    return await request<ReadingProgress | null>(
+      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`
+    )
+  } catch {
+    return null
+  }
+}
+
+export async function saveReadingProgress(
+  idOrSlug: string,
+  update: { chapter_id: number; page_number: number; total_pages?: number | null }
+): Promise<ReadingProgress | null> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+
+  // If not in Telegram (Guest mode in browser), save to localStorage only
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    const localRecord: ReadingProgress = {
+      manga_id: 0,
+      chapter_id: update.chapter_id,
+      chapter_number: 0,
+      page_number: update.page_number,
+      total_pages: update.total_pages,
+      updated_at: new Date().toISOString(),
+    }
+    try {
+      localStorage.setItem(`onigiri_guest_progress_${idOrSlug.trim()}`, JSON.stringify(localRecord))
+    } catch {
+      // Ignore
+    }
+    return localRecord
+  }
+
+  try {
+    return await request<ReadingProgress>(
+      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`,
+      {
+        method: 'POST',
+        body: JSON.stringify(update),
+      }
+    )
+  } catch (err) {
+    console.warn('Failed to save reading progress to backend:', err)
+    return null
+  }
+}
+
+export function getPageImageUrl(
+  chapterId: number,
+  pageNumber: number,
+  dataSaver: boolean = false
+): string {
+  const query = dataSaver ? '?data_saver=true' : ''
+  return `${API_BASE_URL}/manga/chapters/${chapterId}/pages/${pageNumber}${query}`
 }

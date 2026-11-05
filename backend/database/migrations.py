@@ -583,6 +583,35 @@ def _migration_005_chapter_source_identity(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_user_reading_progress(conn: sqlite3.Connection) -> None:
+    """
+    Migration 006: Create user_reading_progress table.
+    Stores verified Telegram user reading state with cascading deletions.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_reading_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+            page_number INTEGER NOT NULL DEFAULT 1,
+            total_pages INTEGER DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, manga_id)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reading_progress_user_manga ON user_reading_progress(user_id, manga_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reading_progress_updated ON user_reading_progress(user_id, updated_at DESC)"
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -590,6 +619,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (3, "003_fts5_search_index", _migration_003_fts5_search_index),
     (4, "004_manga_sources_global_unique", _migration_004_manga_sources_global_unique),
     (5, "005_chapter_source_identity", _migration_005_chapter_source_identity),
+    (6, "006_user_reading_progress", _migration_006_user_reading_progress),
 ]
 
 

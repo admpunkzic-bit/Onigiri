@@ -11,18 +11,17 @@ import {
   Info,
   RefreshCw,
   Search,
-  Sparkles,
   Star,
   Users,
-  X,
 } from 'lucide-react'
 import {
   ApiError,
   fetchMangaChapters,
   fetchMangaDetail,
+  fetchReadingProgress,
   syncMangaChapters,
 } from '../services/api'
-import type { ChapterItem, MangaDetail } from '../types/manga'
+import type { ChapterItem, MangaDetail, ReadingProgress } from '../types/manga'
 
 function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
@@ -60,7 +59,7 @@ export default function MangaDetailPage() {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [isSyncing, setIsSyncing] = useState(false)
   const [isDescExpanded, setIsDescExpanded] = useState(false)
-  const [selectedChapter, setSelectedChapter] = useState<ChapterItem | null>(null)
+  const [progress, setProgress] = useState<ReadingProgress | null>(null)
 
   const statusLabels: Record<string, { label: string; color: string }> = {
     ongoing: { label: 'Онгоинг', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
@@ -79,6 +78,13 @@ export default function MangaDetailPage() {
       const data = await fetchMangaDetail(idOrSlug)
       setManga(data)
       setChapters(data.chapters || [])
+
+      try {
+        const prog = await fetchReadingProgress(idOrSlug)
+        setProgress(prog)
+      } catch {
+        // Ignore progress error
+      }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.statusCode === 404) {
         setError('not_found')
@@ -300,6 +306,42 @@ export default function MangaDetailPage() {
                 ))}
               </div>
             )}
+
+            {/* Action Button: Continue / Start Reading */}
+            {chapters.length > 0 && (
+              <div className="mb-4">
+                {progress ? (
+                  <button
+                    onClick={() =>
+                      navigate(
+                        `/manga/${manga.slug || manga.id}/chapter/${progress.chapter_id}`
+                      )
+                    }
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
+                  >
+                    <BookOpen size={16} />
+                    <span>
+                      Продолжить: Глава {progress.chapter_number} (стр. {progress.page_number})
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      const sorted = [...chapters].sort((a, b) => a.chapter_number - b.chapter_number)
+                      navigate(
+                        `/manga/${manga.slug || manga.id}/chapter/${sorted[0]?.id || chapters[0].id}`
+                      )
+                    }}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
+                  >
+                    <BookOpen size={16} />
+                    <span>
+                      Начать читать (Глава {chapters[0]?.chapter_number || 1})
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Description */}
@@ -405,13 +447,19 @@ export default function MangaDetailPage() {
               return (
                 <div
                   key={ch.id}
-                  onClick={() => setSelectedChapter(ch)}
+                  onClick={() =>
+                    navigate(
+                      `/manga/${manga.slug || manga.id}/chapter/${ch.id}`
+                    )
+                  }
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault()
-                      setSelectedChapter(ch)
+                      navigate(
+                        `/manga/${manga.slug || manga.id}/chapter/${ch.id}`
+                      )
                     }
                   }}
                   className="w-full text-left bg-surface hover:bg-surface/80 active:scale-[0.99] border border-white/5 hover:border-accent/30 rounded-xl p-3.5 transition-all flex items-center justify-between group cursor-pointer"
@@ -454,75 +502,6 @@ export default function MangaDetailPage() {
           </div>
         )}
       </div>
-
-      {/* Honest Reader Modal (TASK 012 Notice) */}
-      {selectedChapter && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200"
-          onClick={() => setSelectedChapter(null)}
-        >
-          <div
-            className="w-full max-w-sm bg-surface rounded-2xl border border-white/10 p-6 shadow-2xl relative"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setSelectedChapter(null)}
-              className="absolute top-4 right-4 text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
-              title="Закрыть"
-            >
-              <X size={18} />
-            </button>
-
-            <div className="w-12 h-12 rounded-2xl bg-accent/15 text-accent flex items-center justify-center mb-4">
-              <Sparkles size={24} />
-            </div>
-
-            <h3 className="text-base font-semibold text-text-primary mb-1">
-              Читалка в разработке
-            </h3>
-
-            <p className="text-xs text-text-secondary mb-4 leading-relaxed">
-              Чтение главы{' '}
-              <span className="text-text-primary font-medium">
-                №{selectedChapter.chapter_number}
-                {selectedChapter.title ? ` («${selectedChapter.title}»)` : ''}
-              </span>{' '}
-              появится в следующем обновлении{' '}
-              <span className="text-accent font-semibold">(TASK 012)</span>.
-            </p>
-
-            <div className="bg-white/5 rounded-xl p-3 text-xs text-text-secondary space-y-1 mb-5">
-              <div className="flex justify-between">
-                <span>Язык:</span>
-                <span className="text-text-primary font-medium">Русский (ru)</span>
-              </div>
-              {selectedChapter.scanlation_group && (
-                <div className="flex justify-between">
-                  <span>Переводчики:</span>
-                  <span className="text-accent font-medium">
-                    {selectedChapter.scanlation_group}
-                  </span>
-                </div>
-              )}
-              {selectedChapter.published_at && (
-                <div className="flex justify-between">
-                  <span>Дата:</span>
-                  <span className="text-text-primary">
-                    {formatDate(selectedChapter.published_at)}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <button
-              onClick={() => setSelectedChapter(null)}
-              className="w-full py-2.5 px-4 bg-accent hover:bg-accent/90 text-white text-xs font-medium rounded-xl transition-colors cursor-pointer"
-            >
-              Понятно
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

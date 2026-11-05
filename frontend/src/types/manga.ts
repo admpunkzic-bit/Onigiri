@@ -47,3 +47,32 @@ export interface MangaDetail extends MangaItem {
   banner_url?: string | null
   chapters: ChapterItem[]
 }
+
+export interface ChapterReaderPageItem {
+  page_number: number
+  image_url: string
+}
+
+export interface ChapterReaderDetail {
+  chapter_id: number
+  manga_id: number
+  manga_title: string
+  chapter_number: number
+  volume_number?: number | null
+  title?: string | null
+  scanlation_group?: string | null
+  total_pages: number
+  pages: ChapterReaderPageItem[]
+  prev_chapter_id?: number | null
+  next_chapter_id?: number | null
+}
+
+export interface ReadingProgress {
+  manga_id: number
+  chapter_id: number
+  chapter_number: number
+  chapter_title?: string | null
+  page_number: number
+  total_pages?: number | null
+  updated_at: string
+}

@@ -39,6 +39,14 @@ export interface TelegramViewportChangedPayload {
   isStateStable: boolean
 }
 
+export interface TelegramBackButton {
+  isVisible: boolean
+  onClick: (callback: () => void) => void
+  offClick: (callback: () => void) => void
+  show: () => void
+  hide: () => void
+}
+
 export interface TelegramWebApp {
   initData: string
   initDataUnsafe: Record<string, unknown>
@@ -53,6 +61,7 @@ export interface TelegramWebApp {
   backgroundColor?: string
   safeAreaInset?: TelegramSafeAreaInset
   contentSafeAreaInset?: TelegramContentSafeAreaInset
+  BackButton?: TelegramBackButton
 
   isVersionAtLeast?: (version: string) => boolean
   setHeaderColor?: (color: string) => void
