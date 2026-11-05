@@ -5,7 +5,7 @@
  * Falls back to http://localhost:8000/api for local development.
  */
 
-import type { MangaItem } from '../types/manga'
+import type { ChapterItem, MangaDetail, MangaItem } from '../types/manga'
 
 const API_BASE_URL: string =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
@@ -84,4 +84,27 @@ export async function fetchMangaSearch(params: SearchMangaParams): Promise<Manga
   })
 
   return request<MangaItem[]>(`/manga/search?${queryParams.toString()}`)
+}
+
+export function fetchMangaDetail(idOrSlug: string): Promise<MangaDetail> {
+  return request<MangaDetail>(`/manga/${encodeURIComponent(idOrSlug.trim())}`)
+}
+
+export function fetchMangaChapters(
+  idOrSlug: string,
+  order: 'asc' | 'desc' = 'asc'
+): Promise<ChapterItem[]> {
+  const queryParams = new URLSearchParams({ order })
+  return request<ChapterItem[]>(
+    `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters?${queryParams.toString()}`
+  )
+}
+
+export function syncMangaChapters(
+  idOrSlug: string
+): Promise<{ status: string; chapters_count: number }> {
+  return request<{ status: string; chapters_count: number }>(
+    `/manga/${encodeURIComponent(idOrSlug.trim())}/sync`,
+    { method: 'POST' }
+  )
 }

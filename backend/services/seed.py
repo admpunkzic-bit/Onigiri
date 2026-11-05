@@ -352,14 +352,16 @@ def seed_data(conn: sqlite3.Connection) -> None:
 
             # Insert chapters for this source
             for ch in source_info.get("chapters", []):
+                source_chapter_id = ch.get("source_chapter_id") or f"seed-{manga_source_id}-{ch['chapter_number']}"
                 cursor.execute(
                     """
                     INSERT INTO chapters (
-                        manga_id, manga_source_id, chapter_number, volume_number, title
+                        manga_id, manga_source_id, source_chapter_id, chapter_number, volume_number, title
                     )
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(manga_source_id, chapter_number) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(manga_source_id, source_chapter_id) DO UPDATE SET
                         manga_id = excluded.manga_id,
+                        chapter_number = excluded.chapter_number,
                         volume_number = excluded.volume_number,
                         title = excluded.title,
                         updated_at = CURRENT_TIMESTAMP
@@ -368,6 +370,7 @@ def seed_data(conn: sqlite3.Connection) -> None:
                     (
                         manga_id,
                         manga_source_id,
+                        source_chapter_id,
                         ch["chapter_number"],
                         ch.get("volume_number"),
                         ch.get("title"),

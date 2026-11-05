@@ -7,6 +7,7 @@ Ensures Russian-only content, canonical Onigiri representations, and avoids
 duplicating manga records.
 """
 
+import asyncio
 import logging
 import sqlite3
 from typing import Dict, List, Optional, Set
@@ -14,6 +15,7 @@ from typing import Dict, List, Optional, Set
 from database.migrations import is_fts5_available, search_manga, slugify
 from providers.base import (
     BaseMangaProvider,
+    ProviderChaptersResult,
     ProviderError,
     ProviderMangaItem,
     ProviderNetworkError,
@@ -332,23 +334,203 @@ class CatalogService:
 
         return self._load_manga_list_items(final_ids)
 
-    async def get_manga_by_id_or_slug(self, id_or_slug: str) -> Optional[MangaDetailRead]:
+    def _find_manga_row(self, identifier: str) -> Optional[sqlite3.Row]:
         """
-        Retrieve manga details by internal Onigiri ID or unique slug.
-        Increments view count and populates authors and genres.
+        Locate manga row by Onigiri numeric ID, slug, or external source_manga_id (UUID).
+        """
+        cursor = self.conn.cursor()
+        clean = identifier.strip()
+
+        # 1. Numeric ID
+        if clean.isdigit():
+            cursor.execute("SELECT * FROM manga WHERE id = ?", (int(clean),))
+            row = cursor.fetchone()
+            if row:
+                return row
+
+        # 2. Slug
+        cursor.execute("SELECT * FROM manga WHERE slug = ?", (clean,))
+        row = cursor.fetchone()
+        if row:
+            return row
+
+        # 3. External source_manga_id (e.g. MangaDex UUID)
+        cursor.execute(
+            """
+            SELECT m.*
+            FROM manga m
+            JOIN manga_sources ms ON ms.manga_id = m.id
+            WHERE ms.source_manga_id = ?
+            LIMIT 1
+            """,
+            (clean,),
+        )
+        return cursor.fetchone()
+
+    def _load_manga_chapters(self, manga_id: int, order: str = "asc") -> List[ChapterRead]:
+        """Load chapters for manga with ordering by chapter number."""
+        cursor = self.conn.cursor()
+        order_dir = "ASC" if order.lower() == "asc" else "DESC"
+        cursor.execute(
+            f"""
+            SELECT id, manga_id, manga_source_id, source_chapter_id, chapter_number,
+                   volume_number, title, language, scanlation_group, published_at,
+                   created_at, updated_at
+            FROM chapters
+            WHERE manga_id = ?
+            ORDER BY chapter_number {order_dir}, id {order_dir}
+            """,
+            (manga_id,),
+        )
+        chapters: List[ChapterRead] = []
+        for c in cursor.fetchall():
+            chapters.append(
+                ChapterRead(
+                    id=c["id"],
+                    manga_id=c["manga_id"],
+                    manga_source_id=c["manga_source_id"],
+                    source_chapter_id=c["source_chapter_id"],
+                    chapter_number=c["chapter_number"],
+                    volume_number=c["volume_number"],
+                    title=c["title"],
+                    language=c["language"] or "ru",
+                    scanlation_group=c["scanlation_group"],
+                    published_at=c["published_at"],
+                    created_at=c["created_at"],
+                    updated_at=c["updated_at"],
+                )
+            )
+        return chapters
+
+    async def sync_manga_chapters(self, manga_id: int) -> List[ChapterRead]:
+        """
+        Fetch all Russian chapters from external providers (e.g. MangaDex)
+        and idempotently persist them into the SQLite chapters table.
+        Follows pagination across all pages to sync the full chapter list.
+        Enforces Russian-only language restriction and safe deduplication.
+        """
+        if not self.registry:
+            return self._load_manga_chapters(manga_id)
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
+            (manga_id,),
+        )
+        sources = cursor.fetchall()
+        if not sources:
+            return self._load_manga_chapters(manga_id)
+
+        for src in sources:
+            src_id = src["id"]
+            src_name = src["source_name"]
+            src_manga_id = src["source_manga_id"]
+
+            try:
+                provider = self.registry.get(src_name)
+            except Exception as exc:
+                logger.warning("Provider '%s' not available for sync: %s", src_name, exc)
+                continue
+
+            page = 1
+            limit = 100
+            max_pages = 50
+            while page <= max_pages:
+                try:
+                    res = await provider.get_chapters(
+                        provider_manga_id=src_manga_id,
+                        language="ru",
+                        page=page,
+                        limit=limit,
+                    )
+                except Exception as exc:
+                    logger.error("Error fetching chapters for source %s (page %d): %s", src_manga_id, page, exc)
+                    break
+
+                if not isinstance(res, ProviderChaptersResult) or not res.chapters:
+                    break
+
+                for ch in res.chapters:
+                    # Strict Russian language validation
+                    if getattr(ch, "language", None) != "ru":
+                        continue
+
+                    ch_num = ch.chapter_number_numeric if ch.chapter_number_numeric is not None else 0.0
+
+                    cursor.execute(
+                        """
+                        INSERT INTO chapters (
+                            manga_id,
+                            manga_source_id,
+                            source_chapter_id,
+                            chapter_number,
+                            volume_number,
+                            title,
+                            language,
+                            scanlation_group,
+                            published_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(manga_source_id, source_chapter_id) DO UPDATE SET
+                            chapter_number = excluded.chapter_number,
+                            volume_number = excluded.volume_number,
+                            title = excluded.title,
+                            language = excluded.language,
+                            scanlation_group = excluded.scanlation_group,
+                            published_at = excluded.published_at,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            manga_id,
+                            src_id,
+                            ch.provider_chapter_id,
+                            ch_num,
+                            ch.volume_number,
+                            ch.title,
+                            "ru",
+                            ch.scanlation_group,
+                            ch.published_at.isoformat() if ch.published_at else None,
+                        ),
+                    )
+
+                self.conn.commit()
+
+                if not res.has_next:
+                    break
+                page += 1
+                await asyncio.sleep(0.05)
+
+        return self._load_manga_chapters(manga_id)
+
+    async def get_manga_by_id_or_slug(
+        self,
+        id_or_slug: str,
+        auto_sync_chapters: bool = True,
+    ) -> Optional[MangaDetailRead]:
+        """
+        Retrieve manga details by internal Onigiri ID, unique slug, or external provider UUID.
+        Automatically provisions manga from external provider if accessed by valid provider UUID.
+        Automatically synchronizes chapters if none are currently stored.
+        Increments view count and populates authors, genres, and chapters.
         External provider details and source names are omitted from public response.
         """
         cursor = self.conn.cursor()
         clean_identifier = id_or_slug.strip()
 
-        row = None
-        if clean_identifier.isdigit():
-            cursor.execute("SELECT * FROM manga WHERE id = ?", (int(clean_identifier),))
-            row = cursor.fetchone()
+        row = self._find_manga_row(clean_identifier)
 
-        if not row:
-            cursor.execute("SELECT * FROM manga WHERE slug = ?", (clean_identifier,))
-            row = cursor.fetchone()
+        # If not found locally, attempt to resolve via registered provider if clean_identifier resembles external ID
+        if not row and self.registry:
+            try:
+                provider = self.registry.get("mangadex")
+                external_item = await provider.get_manga_details(clean_identifier)
+                if external_item:
+                    # Enforce Russian availability check if declared
+                    if not external_item.available_languages or "ru" in external_item.available_languages:
+                        m_id = self.upsert_provider_manga(external_item)
+                        row = self._find_manga_row(str(m_id))
+            except Exception as exc:
+                logger.debug("Identifier '%s' could not be resolved directly via provider: %s", clean_identifier, exc)
 
         if not row:
             return None
@@ -394,29 +576,14 @@ class CatalogService:
             for g in cursor.fetchall()
         ]
 
-        # Load chapters if present in Onigiri
-        cursor.execute(
-            """
-            SELECT id, manga_id, manga_source_id, chapter_number, volume_number, title, created_at, updated_at
-            FROM chapters
-            WHERE manga_id = ?
-            ORDER BY chapter_number ASC
-            """,
-            (manga_id,),
-        )
-        chapters = [
-            ChapterRead(
-                id=c["id"],
-                manga_id=c["manga_id"],
-                manga_source_id=c["manga_source_id"],
-                chapter_number=c["chapter_number"],
-                volume_number=c["volume_number"],
-                title=c["title"],
-                created_at=c["created_at"],
-                updated_at=c["updated_at"],
-            )
-            for c in cursor.fetchall()
-        ]
+        # Check if chapters exist, otherwise perform automatic sync on first visit
+        cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))
+        chapters_count = cursor.fetchone()[0]
+
+        if chapters_count == 0 and auto_sync_chapters and self.registry:
+            chapters = await self.sync_manga_chapters(manga_id)
+        else:
+            chapters = self._load_manga_chapters(manga_id)
 
         return MangaDetailRead(
             id=row["id"],
@@ -438,3 +605,21 @@ class CatalogService:
             sources=[],  # External provider sources are not exposed to the user
             chapters=chapters,
         )
+
+    async def get_chapters_for_manga(
+        self,
+        id_or_slug: str,
+        order: str = "asc",
+    ) -> Optional[List[ChapterRead]]:
+        """Retrieve chapter list for a manga by ID, slug, or external UUID with specified ordering."""
+        row = self._find_manga_row(id_or_slug)
+        if not row:
+            return None
+        manga_id = row["id"]
+
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))
+        if cursor.fetchone()[0] == 0 and self.registry:
+            await self.sync_manga_chapters(manga_id)
+
+        return self._load_manga_chapters(manga_id, order=order)

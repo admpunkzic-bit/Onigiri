@@ -461,12 +461,135 @@ def _migration_004_manga_sources_global_unique(conn: sqlite3.Connection) -> None
     )
 
 
+def _migration_005_chapter_source_identity(conn: sqlite3.Connection) -> None:
+    """
+    Migration 5: Add source_chapter_id, scanlation_group, published_at and language to chapters.
+    Migrates uniqueness constraint to UNIQUE(manga_source_id, source_chapter_id).
+    Safely upgrades existing databases preserving all existing chapters and chapter_pages.
+    """
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='chapters'")
+    row = cursor.fetchone()
+    if not row:
+        return
+    table_sql = row[0]
+
+    # Check if migration was already applied (source_chapter_id column exists)
+    if "source_chapter_id" in table_sql:
+        return
+
+    # Check if foreign keys are currently active and cannot be disabled due to an outer transaction
+    is_fk_active = bool(cursor.execute("PRAGMA foreign_keys").fetchone()[0])
+    if is_fk_active:
+        raise sqlite3.OperationalError(
+            "Cannot execute migration 5 inside an active transaction: altering table "
+            "'chapters' requires disabling foreign keys (PRAGMA foreign_keys = OFF), "
+            "which SQLite prohibits within an active transaction. "
+            "Commit or rollback the outer transaction before executing migrations."
+        )
+
+    # 1. Create new table chapters_v5 with extended columns and stable source identity
+    cursor.execute(
+        """
+        CREATE TABLE chapters_v5 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            manga_source_id INTEGER NOT NULL REFERENCES manga_sources(id) ON DELETE CASCADE,
+            source_chapter_id TEXT,
+            chapter_number REAL NOT NULL,
+            volume_number INTEGER,
+            title TEXT,
+            language TEXT NOT NULL DEFAULT 'ru',
+            scanlation_group TEXT,
+            published_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_source_id, source_chapter_id)
+        )
+        """
+    )
+
+    # 2. Inspect existing columns to dynamically copy data without failing on test tables
+    cursor.execute("PRAGMA table_info(chapters)")
+    existing_cols = {col[1] for col in cursor.fetchall()}
+
+    select_cols = ["id", "manga_id", "manga_source_id", "chapter_number"]
+    dest_cols = ["id", "manga_id", "manga_source_id", "chapter_number"]
+
+    for opt in ("source_chapter_id", "volume_number", "title", "language", "scanlation_group", "published_at", "created_at", "updated_at"):
+        if opt in existing_cols:
+            select_cols.append(opt)
+            dest_cols.append(opt)
+
+    sel_str = ", ".join(select_cols)
+    dest_str = ", ".join(dest_cols)
+
+    cursor.execute(f"INSERT INTO chapters_v5 ({dest_str}) SELECT {sel_str} FROM chapters")
+
+    # 3. Drop triggers referencing chapters before swap
+    cursor.execute("DROP TRIGGER IF EXISTS trg_chapters_manga_id_insert")
+    cursor.execute("DROP TRIGGER IF EXISTS trg_chapters_manga_id_update")
+    cursor.execute("DROP TRIGGER IF EXISTS trg_manga_sources_manga_id_update")
+
+    # 4. Swap tables safely
+    cursor.execute("DROP TABLE chapters")
+    cursor.execute("ALTER TABLE chapters_v5 RENAME TO chapters")
+
+    # 5. Verify foreign key integrity
+    cursor.execute("PRAGMA foreign_key_check")
+    fk_violations = cursor.fetchall()
+    if fk_violations:
+        raise sqlite3.IntegrityError(f"Foreign key check failed after chapters migration: {fk_violations}")
+
+    # 6. Recreate indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chapters_manga_id ON chapters(manga_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chapters_manga_source ON chapters(manga_source_id, chapter_number)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chapters_source_lookup ON chapters(manga_source_id, source_chapter_id)")
+
+    # 7. Recreate triggers on chapters and manga_sources
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chapters_manga_id_insert
+        BEFORE INSERT ON chapters
+        FOR EACH ROW
+        WHEN (SELECT manga_id FROM manga_sources WHERE id = NEW.manga_source_id) != NEW.manga_id
+        BEGIN
+            SELECT RAISE(ABORT, 'Foreign key mismatch: chapter manga_id does not match manga_sources.manga_id');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chapters_manga_id_update
+        BEFORE UPDATE OF manga_id, manga_source_id ON chapters
+        FOR EACH ROW
+        WHEN (SELECT manga_id FROM manga_sources WHERE id = NEW.manga_source_id) != NEW.manga_id
+        BEGIN
+            SELECT RAISE(ABORT, 'Foreign key mismatch: chapter manga_id does not match manga_sources.manga_id');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_manga_sources_manga_id_update
+        BEFORE UPDATE OF manga_id ON manga_sources
+        FOR EACH ROW
+        WHEN NEW.manga_id != OLD.manga_id AND (SELECT COUNT(*) FROM chapters WHERE manga_source_id = OLD.id) > 0
+        BEGIN
+            SELECT RAISE(ABORT, 'Cannot update manga_id: source already has associated chapters');
+        END;
+        """
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
     (2, "002_sources_authors_genres_chapters", _migration_002_sources_authors_genres_chapters),
     (3, "003_fts5_search_index", _migration_003_fts5_search_index),
     (4, "004_manga_sources_global_unique", _migration_004_manga_sources_global_unique),
+    (5, "005_chapter_source_identity", _migration_005_chapter_source_identity),
 ]
 
 

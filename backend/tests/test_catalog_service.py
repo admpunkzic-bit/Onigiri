@@ -16,6 +16,7 @@ from database.migrations import run_migrations
 from main import app
 from providers.base import (
     BaseMangaProvider,
+    ProviderChapterItem,
     ProviderChaptersResult,
     ProviderMangaItem,
     ProviderNetworkError,
@@ -44,6 +45,18 @@ class DummyMockProvider(BaseMangaProvider):
         self._provider_id = provider_id
         self._name = name
         self.search_mock = AsyncMock()
+        self.get_chapters_mock = AsyncMock(
+            return_value=ProviderChaptersResult(
+                provider_id=self._provider_id,
+                provider_manga_id="default",
+                chapters=[],
+                total=0,
+                page=1,
+                limit=100,
+                has_next=False,
+            )
+        )
+        self.get_details_mock = AsyncMock(return_value=None)
 
     @property
     def provider_id(self) -> str:
@@ -63,7 +76,7 @@ class DummyMockProvider(BaseMangaProvider):
         return await self.search_mock(query, page, limit, languages)
 
     async def get_manga_details(self, provider_manga_id: str) -> ProviderMangaItem:
-        raise NotImplementedError
+        return await self.get_details_mock(provider_manga_id)
 
     async def get_chapters(
         self,
@@ -72,7 +85,7 @@ class DummyMockProvider(BaseMangaProvider):
         page: int = 1,
         limit: int = 100,
     ) -> ProviderChaptersResult:
-        raise NotImplementedError
+        return await self.get_chapters_mock(provider_manga_id, language, page, limit)
 
     async def get_chapter_pages(
         self,
@@ -491,3 +504,285 @@ def test_api_manga_cover_proxy_success(monkeypatch):
         assert resp.content == b"fake-jpeg-bytes"
         assert resp.headers["content-type"] == "image/jpeg"
         assert "max-age" in resp.headers["cache-control"]
+
+
+# ==============================================================================
+# 5. Russian Chapter Synchronization, Deduplication & Endpoints (TASK 011.1)
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_sync_chapters_pagination_and_deduplication(catalog_db: sqlite3.Connection):
+    """
+    Verify sync_manga_chapters paginates through all pages, accurately saves
+    chapters into SQLite, and is 100% idempotent on repeated executions (no duplicates).
+    """
+    mock_provider = DummyMockProvider(provider_id="mangadex")
+
+    # Page 1: Chapters 1 (Scan A), 1 (Scan B - same chapter number, different UUID), 2
+    page1 = ProviderChaptersResult(
+        provider_id="mangadex",
+        provider_manga_id="md-berserk-test",
+        chapters=[
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-berserk-test",
+                provider_chapter_id="ch-uuid-1-a",
+                chapter_number_raw="1",
+                chapter_number_numeric=1.0,
+                is_special=False,
+                volume_number=1,
+                title="Chapter 1 Team A",
+                language="ru",
+                scanlation_group="Team A",
+            ),
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-berserk-test",
+                provider_chapter_id="ch-uuid-1-b",
+                chapter_number_raw="1",
+                chapter_number_numeric=1.0,
+                is_special=False,
+                volume_number=1,
+                title="Chapter 1 Team B",
+                language="ru",
+                scanlation_group="Team B",
+            ),
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-berserk-test",
+                provider_chapter_id="ch-uuid-2",
+                chapter_number_raw="2",
+                chapter_number_numeric=2.0,
+                is_special=False,
+                volume_number=1,
+                title="Chapter 2",
+                language="ru",
+                scanlation_group="Team A",
+            ),
+        ],
+        total=4,
+        page=1,
+        limit=3,
+        has_next=True,
+    )
+
+    # Page 2: Chapter 3
+    page2 = ProviderChaptersResult(
+        provider_id="mangadex",
+        provider_manga_id="md-berserk-test",
+        chapters=[
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-berserk-test",
+                provider_chapter_id="ch-uuid-3",
+                chapter_number_raw="3",
+                chapter_number_numeric=3.0,
+                is_special=False,
+                volume_number=1,
+                title="Chapter 3",
+                language="ru",
+                scanlation_group="Team A",
+            ),
+        ],
+        total=4,
+        page=2,
+        limit=3,
+        has_next=False,
+    )
+
+    async def mock_get_chapters(manga_id, language, page, limit):
+        if page == 1:
+            return page1
+        return page2
+
+    mock_provider.get_chapters_mock.side_effect = mock_get_chapters
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+
+    service = CatalogService(conn=catalog_db, registry=registry)
+
+    # Create manga and source
+    manga_id = service.upsert_provider_manga(
+        ProviderMangaItem(
+            provider_id="mangadex",
+            provider_manga_id="md-berserk-test",
+            title="Berserk Test",
+            alt_titles=[],
+            status="ongoing",
+            authors=["Kentaro Miura"],
+            genres=["Dark Fantasy"],
+            available_languages=["ru"],
+        )
+    )
+
+    # 1. First sync: should insert 4 chapters across 2 pages
+    chapters_after_first = await service.sync_manga_chapters(manga_id)
+    assert len(chapters_after_first) == 4
+
+    cursor = catalog_db.cursor()
+    cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))
+    assert cursor.fetchone()[0] == 4
+
+    # 2. Second sync: must not create duplicates
+    chapters_after_second = await service.sync_manga_chapters(manga_id)
+    assert len(chapters_after_second) == 4
+
+    cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))
+    assert cursor.fetchone()[0] == 4
+
+
+@pytest.mark.anyio
+async def test_russian_only_enforcement_in_sync(catalog_db: sqlite3.Connection):
+    """Ensure non-Russian chapters returned by any provider are ignored during DB insertion."""
+    mock_provider = DummyMockProvider(provider_id="mangadex")
+
+    mock_provider.get_chapters_mock.return_value = ProviderChaptersResult(
+        provider_id="mangadex",
+        provider_manga_id="md-lang-test",
+        chapters=[
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-lang-test",
+                provider_chapter_id="ch-ru",
+                chapter_number_numeric=1.0,
+                language="ru",
+                title="Russian",
+            ),
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-lang-test",
+                provider_chapter_id="ch-en",
+                chapter_number_numeric=1.0,
+                language="en",
+                title="English Sneak",
+            ),
+        ],
+        total=2,
+        page=1,
+        limit=10,
+        has_next=False,
+    )
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+    service = CatalogService(conn=catalog_db, registry=registry)
+
+    manga_id = service.upsert_provider_manga(
+        ProviderMangaItem(
+            provider_id="mangadex",
+            provider_manga_id="md-lang-test",
+            title="Lang Test",
+            alt_titles=[],
+            status="ongoing",
+            available_languages=["ru"],
+        )
+    )
+
+    synced = await service.sync_manga_chapters(manga_id)
+    assert len(synced) == 1
+    assert synced[0].source_chapter_id == "ch-ru"
+    assert synced[0].language == "ru"
+
+
+@pytest.mark.anyio
+async def test_get_manga_by_external_uuid(catalog_db: sqlite3.Connection):
+    """Verify that get_manga_by_id_or_slug can resolve directly by MangaDex UUID."""
+    mock_provider = DummyMockProvider(provider_id="mangadex")
+    mock_provider.get_details_mock.return_value = ProviderMangaItem(
+        provider_id="mangadex",
+        provider_manga_id="801513ba-a712-498c-8f57-cae55b38cc92",
+        title="Berserk External",
+        alt_titles=["ベルセルク"],
+        description="Guts story",
+        status="ongoing",
+        authors=["Kentaro Miura"],
+        genres=["Dark Fantasy"],
+        available_languages=["ru"],
+    )
+    mock_provider.get_chapters_mock.return_value = ProviderChaptersResult(
+        provider_id="mangadex",
+        provider_manga_id="801513ba-a712-498c-8f57-cae55b38cc92",
+        chapters=[],
+        total=0,
+        page=1,
+        limit=100,
+        has_next=False,
+    )
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+    service = CatalogService(conn=catalog_db, registry=registry)
+
+    # Not in DB yet, query directly by UUID
+    manga = await service.get_manga_by_id_or_slug("801513ba-a712-498c-8f57-cae55b38cc92")
+    assert manga is not None
+    assert manga.title == "Berserk External"
+    assert manga.sources == []  # Not exposed
+
+
+def test_api_manga_chapters_list_and_sync_endpoints():
+    """Verify GET /api/manga/{id}/chapters and POST /api/manga/{id}/sync endpoints."""
+    mock_provider = DummyMockProvider(provider_id="mangadex")
+    mock_provider.get_details_mock.return_value = ProviderMangaItem(
+        provider_id="mangadex",
+        provider_manga_id="md-ep-test",
+        title="Endpoint Test",
+        alt_titles=[],
+        status="ongoing",
+        available_languages=["ru"],
+    )
+    mock_provider.get_chapters_mock.return_value = ProviderChaptersResult(
+        provider_id="mangadex",
+        provider_manga_id="md-ep-test",
+        chapters=[
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-ep-test",
+                provider_chapter_id="ep-ch-1",
+                chapter_number_numeric=1.0,
+                language="ru",
+                title="Ch 1",
+            ),
+            ProviderChapterItem(
+                provider_id="mangadex",
+                provider_manga_id="md-ep-test",
+                provider_chapter_id="ep-ch-2",
+                chapter_number_numeric=2.0,
+                language="ru",
+                title="Ch 2",
+            ),
+        ],
+        total=2,
+        page=1,
+        limit=100,
+        has_next=False,
+    )
+
+    mock_registry = ProviderRegistry()
+    mock_registry.register(mock_provider)
+
+    with TestClient(app) as client:
+        app.state.provider_registry = mock_registry
+        # 1. Fetch by UUID: triggers auto-provision and sync
+        detail_resp = client.get("/api/manga/md-ep-test")
+        assert detail_resp.status_code == 200
+        detail_data = detail_resp.json()
+        assert detail_data["title"] == "Endpoint Test"
+        assert len(detail_data["chapters"]) == 2
+
+        # 2. GET /api/manga/{id}/chapters?order=desc
+        manga_id = detail_data["id"]
+        ch_resp = client.get(f"/api/manga/{manga_id}/chapters", params={"order": "desc"})
+        assert ch_resp.status_code == 200
+        chapters = ch_resp.json()
+        assert len(chapters) == 2
+        assert chapters[0]["chapter_number"] == 2.0
+        assert chapters[1]["chapter_number"] == 1.0
+
+        # 3. POST /api/manga/{id}/sync
+        sync_resp = client.post(f"/api/manga/{manga_id}/sync")
+        assert sync_resp.status_code == 200
+        sync_data = sync_resp.json()
+        assert sync_data["status"] == "ok"
+        assert sync_data["chapters_count"] == 2

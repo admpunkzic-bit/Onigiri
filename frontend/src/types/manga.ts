@@ -29,3 +29,21 @@ export interface MangaItem {
   genres: GenreRead[]
   authors: AuthorRead[]
 }
+
+export interface ChapterItem {
+  id: number
+  manga_id: number
+  source_chapter_id?: string | null
+  chapter_number: number
+  volume_number?: number | null
+  title?: string | null
+  language?: string
+  scanlation_group?: string | null
+  published_at?: string | null
+}
+
+export interface MangaDetail extends MangaItem {
+  description?: string | null
+  banner_url?: string | null
+  chapters: ChapterItem[]
+}

@@ -24,7 +24,7 @@ from providers.base import (
     ProviderSearchResult,
 )
 from providers.registry import ProviderRegistry
-from schemas.manga import MangaDetailRead, MangaListRead
+from schemas.manga import ChapterRead, MangaDetailRead, MangaListRead
 from services.catalog import CatalogService
 
 router = APIRouter()
@@ -144,6 +144,43 @@ async def get_manga_detail(
     if not manga:
         raise HTTPException(status_code=404, detail="Manga not found")
     return manga
+
+
+@router.get("/manga/{id_or_slug}/chapters", response_model=List[ChapterRead])
+async def get_manga_chapters_list(
+    id_or_slug: str,
+    order: str = Query("asc", description="Sort order: 'asc' or 'desc'"),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get full Russian chapters list for a manga by ID, slug, or external UUID.
+    Sorted by chapter number. Sources are sanitized and not exposed.
+    """
+    clean_order = order.lower() if order.lower() in ("asc", "desc") else "asc"
+    chapters = await catalog_service.get_chapters_for_manga(id_or_slug, order=clean_order)
+    if chapters is None:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    return chapters
+
+
+@router.post("/manga/{id_or_slug}/sync")
+async def sync_manga_chapters_endpoint(
+    id_or_slug: str,
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Force synchronization of Russian chapters for a manga from external providers.
+    Returns count of synced chapters. Idempotent.
+    """
+    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug, auto_sync_chapters=False)
+    if not manga:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    chapters = await catalog_service.sync_manga_chapters(manga.id)
+    return {
+        "status": "ok",
+        "manga_id": manga.id,
+        "chapters_count": len(chapters),
+    }
 
 
 # ==============================================================================

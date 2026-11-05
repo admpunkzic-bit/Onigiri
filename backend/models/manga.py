@@ -79,6 +79,10 @@ class Chapter:
     chapter_number: float
     volume_number: Optional[int] = None
     title: Optional[str] = None
+    source_chapter_id: Optional[str] = None
+    language: str = "ru"
+    scanlation_group: Optional[str] = None
+    published_at: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     pages: List[ChapterPage] = field(default_factory=list)
@@ -93,6 +97,10 @@ class Chapter:
             chapter_number=float(row["chapter_number"]),
             volume_number=row["volume_number"] if "volume_number" in keys else None,
             title=row["title"] if "title" in keys else None,
+            source_chapter_id=row["source_chapter_id"] if "source_chapter_id" in keys else None,
+            language=row["language"] if "language" in keys else "ru",
+            scanlation_group=row["scanlation_group"] if "scanlation_group" in keys else None,
+            published_at=str(row["published_at"]) if "published_at" in keys and row["published_at"] is not None else None,
             created_at=row["created_at"] if "created_at" in keys else None,
             updated_at=row["updated_at"] if "updated_at" in keys else None,
         )

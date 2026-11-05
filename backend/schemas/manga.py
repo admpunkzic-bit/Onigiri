@@ -74,6 +74,10 @@ class ChapterBase(BaseModel):
     chapter_number: float = Field(..., ge=0)
     volume_number: Optional[int] = Field(None, ge=0)
     title: Optional[str] = None
+    source_chapter_id: Optional[str] = None
+    language: Optional[str] = "ru"
+    scanlation_group: Optional[str] = None
+    published_at: Optional[datetime] = None
 
 
 class ChapterCreate(ChapterBase):

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from database.connection import get_connection, init_db
 from database.migrations import (
+    MIGRATIONS,
     is_fts5_available,
     run_migrations,
     search_manga,
@@ -130,7 +131,7 @@ def test_migration_idempotency(migrated_db: sqlite3.Connection):
 
     cursor = migrated_db.cursor()
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 4
+    assert cursor.fetchone()[0] == 5
 
 
 # ==============================================================================
@@ -898,7 +899,7 @@ def test_migration_004_upgrades_task_007_database(tmp_path: Path):
     # 9. Assert idempotency on second run
     run_migrations(conn)
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 4
+    assert cursor.fetchone()[0] == 5
 
     conn.close()
 
