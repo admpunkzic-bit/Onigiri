@@ -200,6 +200,8 @@ class ChapterReaderDetailRead(BaseModel):
     chapter_id: int
     manga_id: int
     manga_title: str
+    cover_url: Optional[str] = None
+    manga_slug: Optional[str] = None
     chapter_number: Optional[float] = None
     volume_number: Optional[int] = None
     title: Optional[str] = None
@@ -224,3 +226,20 @@ class ReadingProgressRead(BaseModel):
     page_number: int
     total_pages: Optional[int] = None
     updated_at: str
+
+
+class ReadingHistoryItemRead(BaseModel):
+    manga_id: int
+    manga_slug: str
+    manga_title: str
+    cover_url: Optional[str] = None
+    manga_status: Optional[str] = "unknown"
+    chapter_id: int
+    chapter_number: Optional[float] = None
+    volume_number: Optional[int] = None
+    chapter_title: Optional[str] = None
+    page_number: int
+    total_pages: Optional[int] = None
+    updated_at: str
+
+    model_config = ConfigDict(from_attributes=True)

@@ -10,6 +10,7 @@ import type {
   ChapterReaderDetail,
   MangaDetail,
   MangaItem,
+  ReadingHistoryItem,
   ReadingProgress,
 } from '../types/manga'
 
@@ -223,6 +224,29 @@ export async function fetchReadingProgress(
   }
 }
 
+const GUEST_HISTORY_STORAGE_KEY = 'onigiri_guest_history'
+
+function getGuestHistory(): ReadingHistoryItem[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(GUEST_HISTORY_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveGuestHistory(items: ReadingHistoryItem[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(GUEST_HISTORY_STORAGE_KEY, JSON.stringify(items))
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export async function saveReadingProgress(
   idOrSlug: string,
   update: {
@@ -231,26 +255,66 @@ export async function saveReadingProgress(
     chapter_title?: string | null
     page_number: number
     total_pages?: number | null
+    manga_id?: number
+    manga_title?: string
+    manga_slug?: string
+    cover_url?: string | null
+    manga_status?: string | null
   }
 ): Promise<ReadingProgress | null> {
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
 
   // If not in Telegram (Guest mode in browser), save to localStorage only
   if (!tgInitData || tgInitData.trim().length === 0) {
+    const cleanIdOrSlug = idOrSlug.trim()
+    const nowIso = new Date().toISOString()
+    const targetMangaId = update.manga_id || (Number.isInteger(Number(cleanIdOrSlug)) ? Number(cleanIdOrSlug) : 0)
+
     const localRecord: ReadingProgress = {
-      manga_id: 0,
+      manga_id: targetMangaId,
       chapter_id: update.chapter_id,
       chapter_number: update.chapter_number ?? null,
       chapter_title: update.chapter_title ?? null,
       page_number: update.page_number,
       total_pages: update.total_pages,
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
     }
     try {
-      localStorage.setItem(`onigiri_guest_progress_${idOrSlug.trim()}`, JSON.stringify(localRecord))
+      localStorage.setItem(`onigiri_guest_progress_${cleanIdOrSlug}`, JSON.stringify(localRecord))
     } catch {
       // Ignore
     }
+
+    // Also update guest reading history list
+    try {
+      const history = getGuestHistory()
+      const existingIdx = history.findIndex(
+        (h) => (targetMangaId > 0 && h.manga_id === targetMangaId) || h.manga_slug === cleanIdOrSlug
+      )
+
+      const entry: ReadingHistoryItem = {
+        manga_id: targetMangaId || (existingIdx >= 0 ? history[existingIdx].manga_id : 0),
+        manga_slug: update.manga_slug || (existingIdx >= 0 ? history[existingIdx].manga_slug : cleanIdOrSlug),
+        manga_title: update.manga_title || (existingIdx >= 0 ? history[existingIdx].manga_title : cleanIdOrSlug),
+        cover_url: update.cover_url ?? (existingIdx >= 0 ? history[existingIdx].cover_url : null),
+        manga_status: update.manga_status ?? (existingIdx >= 0 ? history[existingIdx].manga_status : 'unknown'),
+        chapter_id: update.chapter_id,
+        chapter_number: update.chapter_number ?? null,
+        chapter_title: update.chapter_title ?? null,
+        page_number: update.page_number,
+        total_pages: update.total_pages ?? null,
+        updated_at: nowIso,
+      }
+
+      if (existingIdx >= 0) {
+        history.splice(existingIdx, 1)
+      }
+      history.unshift(entry)
+      saveGuestHistory(history)
+    } catch {
+      // Ignore
+    }
+
     return localRecord
   }
 
@@ -348,6 +412,53 @@ export async function removeFromLibrary(mangaId: number): Promise<void> {
   }
 
   await request<void>(`/library/${encodeURIComponent(String(mangaId))}`, {
+    method: 'DELETE',
+  })
+}
+
+// ── History API methods ─────────────────────────────────────
+
+export async function fetchReadingHistory(signal?: AbortSignal): Promise<ReadingHistoryItem[]> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    return getGuestHistory()
+  }
+
+  return request<ReadingHistoryItem[]>('/history', { signal })
+}
+
+export async function deleteReadingHistoryItem(mangaId: number | string): Promise<void> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    const current = getGuestHistory()
+    const targetStr = String(mangaId)
+    const targetNum = Number(mangaId)
+    const filtered = current.filter(
+      (item) => String(item.manga_id) !== targetStr && item.manga_slug !== targetStr && (!Number.isInteger(targetNum) || item.manga_id !== targetNum)
+    )
+    saveGuestHistory(filtered)
+    return
+  }
+
+  await request<void>(`/history/${encodeURIComponent(String(mangaId))}`, {
+    method: 'DELETE',
+  })
+}
+
+export async function clearReadingHistory(): Promise<void> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem(GUEST_HISTORY_STORAGE_KEY)
+      } catch {
+        // Ignore
+      }
+    }
+    return
+  }
+
+  await request<void>('/history', {
     method: 'DELETE',
   })
 }

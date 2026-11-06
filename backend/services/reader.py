@@ -21,6 +21,7 @@ from providers.registry import ProviderRegistry
 from schemas.manga import (
     ChapterReaderDetailRead,
     ChapterReaderPageItem,
+    ReadingHistoryItemRead,
     ReadingProgressRead,
 )
 
@@ -218,13 +219,15 @@ class ReaderService:
 
         # Find manga by id or slug
         clean_id = id_or_slug.strip()
-        cursor.execute("SELECT id, title, slug FROM manga WHERE id = ? OR slug = ?", (clean_id, clean_id))
+        cursor.execute("SELECT id, title, slug, cover_url FROM manga WHERE id = ? OR slug = ?", (clean_id, clean_id))
         manga_row = cursor.fetchone()
         if not manga_row:
             raise HTTPException(status_code=404, detail="Manga not found")
 
         manga_id = manga_row["id"]
         manga_title = manga_row["title"]
+        manga_slug = manga_row["slug"]
+        cover_url = manga_row["cover_url"]
 
         # Find chapter and ensure it belongs to this manga
         cursor.execute(
@@ -346,6 +349,8 @@ class ReaderService:
             chapter_id=ch_row["id"],
             manga_id=manga_id,
             manga_title=manga_title,
+            cover_url=cover_url,
+            manga_slug=manga_slug or str(manga_id),
             chapter_number=float(ch_row["chapter_number"]) if ch_row["chapter_number"] is not None else None,
             volume_number=ch_row["volume_number"],
             title=ch_row["title"],
@@ -575,3 +580,89 @@ class ReaderService:
 
         # Fetch and return updated progress
         return self.get_user_progress(user_id, str(manga_id))
+
+    def get_user_history(self, user_id: str) -> List[ReadingHistoryItemRead]:
+        """
+        Get ordered reading history for a verified Telegram user.
+        Includes manga info, cover, chapter info, page progress, and timestamps.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT 
+                p.manga_id,
+                m.slug AS manga_slug,
+                m.title AS manga_title,
+                m.cover_url,
+                m.status AS manga_status,
+                p.chapter_id,
+                c.chapter_number,
+                c.volume_number,
+                c.title AS chapter_title,
+                p.page_number,
+                p.total_pages,
+                p.updated_at
+            FROM user_reading_progress p
+            JOIN manga m ON m.id = p.manga_id
+            JOIN chapters c ON c.id = p.chapter_id
+            WHERE p.user_id = ?
+            ORDER BY p.updated_at DESC, p.id DESC
+            """,
+            (user_id,),
+        )
+        rows = cursor.fetchall()
+        items: List[ReadingHistoryItemRead] = []
+        for r in rows:
+            items.append(
+                ReadingHistoryItemRead(
+                    manga_id=r["manga_id"],
+                    manga_slug=r["manga_slug"] or str(r["manga_id"]),
+                    manga_title=r["manga_title"],
+                    cover_url=r["cover_url"],
+                    manga_status=r["manga_status"] or "unknown",
+                    chapter_id=r["chapter_id"],
+                    chapter_number=float(r["chapter_number"]) if r["chapter_number"] is not None else None,
+                    volume_number=r["volume_number"],
+                    chapter_title=r["chapter_title"],
+                    page_number=r["page_number"],
+                    total_pages=r["total_pages"],
+                    updated_at=str(r["updated_at"]),
+                )
+            )
+        return items
+
+    def delete_user_history_item(self, user_id: str, manga_id_or_slug: str) -> bool:
+        """
+        Remove a specific manga from user reading history.
+        """
+        cursor = self.conn.cursor()
+        clean = manga_id_or_slug.strip()
+        cursor.execute("SELECT id FROM manga WHERE id = ? OR slug = ?", (clean, clean))
+        m_row = cursor.fetchone()
+        if m_row:
+            target_manga_id = m_row["id"]
+        elif clean.isdigit():
+            target_manga_id = int(clean)
+        else:
+            return False
+
+        cursor.execute(
+            "DELETE FROM user_reading_progress WHERE user_id = ? AND manga_id = ?",
+            (user_id, target_manga_id),
+        )
+        deleted = cursor.rowcount > 0
+        self.conn.commit()
+        return deleted
+
+    def clear_user_history(self, user_id: str) -> int:
+        """
+        Clear all reading history for a verified Telegram user.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_reading_progress WHERE user_id = ?",
+            (user_id,),
+        )
+        count = cursor.rowcount
+        self.conn.commit()
+        return count

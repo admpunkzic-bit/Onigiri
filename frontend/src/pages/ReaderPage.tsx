@@ -151,6 +151,10 @@ export default function ReaderPage() {
         chapter_title: detail.title,
         page_number: currentPage,
         total_pages: detail.total_pages,
+        manga_id: detail.manga_id,
+        manga_title: detail.manga_title,
+        manga_slug: detail.manga_slug || idOrSlug,
+        cover_url: detail.cover_url,
       })
     }, 600)
 

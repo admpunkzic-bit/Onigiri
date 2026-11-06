@@ -33,6 +33,7 @@ from schemas.manga import (
     GenreRead,
     MangaDetailRead,
     MangaListRead,
+    ReadingHistoryItemRead,
     ReadingProgressRead,
     ReadingProgressUpdate,
 )
@@ -399,6 +400,47 @@ async def remove_from_user_library(
     """
     removed = catalog_service.remove_from_library(str(user["id"]), id_or_slug)
     return {"status": "removed" if removed else "not_found", "removed": removed}
+
+
+# ==============================================================================
+# Reading History Endpoints (TASK 014 Phase 3)
+# ==============================================================================
+
+@router.get("/history", response_model=List[ReadingHistoryItemRead])
+async def get_reading_history(
+    user: dict = Depends(require_telegram_user),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Get ordered reading history for verified Telegram user.
+    Uses existing user_reading_progress table and returns manga info, cover, chapter, and progress.
+    """
+    return reader_service.get_user_history(str(user["id"]))
+
+
+@router.delete("/history/{manga_id}")
+async def delete_history_item(
+    manga_id: str,
+    user: dict = Depends(require_telegram_user),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Remove a specific manga from reading history for verified Telegram user.
+    """
+    deleted = reader_service.delete_user_history_item(str(user["id"]), manga_id)
+    return {"status": "deleted" if deleted else "not_found", "deleted": deleted}
+
+
+@router.delete("/history")
+async def clear_history(
+    user: dict = Depends(require_telegram_user),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Clear all reading history for verified Telegram user.
+    """
+    deleted_count = reader_service.clear_user_history(str(user["id"]))
+    return {"status": "cleared", "deleted_count": deleted_count}
 
 
 # ==============================================================================

@@ -57,6 +57,8 @@ export interface ChapterReaderDetail {
   chapter_id: number
   manga_id: number
   manga_title: string
+  cover_url?: string | null
+  manga_slug?: string | null
   chapter_number?: number | null
   volume_number?: number | null
   title?: string | null
@@ -71,6 +73,21 @@ export interface ReadingProgress {
   manga_id: number
   chapter_id: number
   chapter_number?: number | null
+  chapter_title?: string | null
+  page_number: number
+  total_pages?: number | null
+  updated_at: string
+}
+
+export interface ReadingHistoryItem {
+  manga_id: number
+  manga_slug: string
+  manga_title: string
+  cover_url?: string | null
+  manga_status?: string | null
+  chapter_id: number
+  chapter_number?: number | null
+  volume_number?: number | null
   chapter_title?: string | null
   page_number: number
   total_pages?: number | null
