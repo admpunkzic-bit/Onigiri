@@ -3,9 +3,11 @@ API routes for Onigiri backend.
 Includes health check, unified manga catalog endpoints, and provider inspection endpoints.
 """
 
+import asyncio
 import sqlite3
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Generator, List, Optional
+from typing import Generator, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 import httpx
@@ -118,27 +120,63 @@ async def search_manga(
     return await catalog_service.search(query=q, page=page, limit=limit)
 
 
+# In-memory LRU cache for cover images: URL -> (content_bytes, content_type)
+_COVER_CACHE: OrderedDict[str, Tuple[bytes, str]] = OrderedDict()
+_MAX_COVER_CACHE_ITEMS = 500
+_COVER_CACHE_LOCK = asyncio.Lock()
+
+ALLOWED_COVER_PREFIXES = (
+    "https://uploads.mangadex.org/",
+    "https://imgcover.manga-chan.me/",
+    "https://thumbs.manga-chan.me/",
+)
+
+
 @router.get("/manga/cover/proxy")
 async def get_manga_cover(
     url: str = Query(..., description="External cover image URL"),
 ):
     """
-    Safely proxy external manga covers to bypass MangaDex anti-hotlinking bot-challenge (HTTP 403).
-    Restricted strictly to authorized MangaDex CDN hosts.
+    Safely proxy external manga covers to bypass anti-hotlinking and bot-challenge protections.
+    Supports in-memory LRU caching to eliminate redundant outbound requests.
+    Restricted strictly to authorized MangaDex and Manga-Chan CDN hosts.
     """
     clean_url = url.strip()
-    if not clean_url.startswith("https://uploads.mangadex.org/"):
+    if not any(clean_url.startswith(prefix) for prefix in ALLOWED_COVER_PREFIXES):
         raise HTTPException(status_code=400, detail="Invalid cover URL: host not permitted")
 
+    async with _COVER_CACHE_LOCK:
+        if clean_url in _COVER_CACHE:
+            _COVER_CACHE.move_to_end(clean_url)
+            cached_content, cached_type = _COVER_CACHE[clean_url]
+            return Response(
+                content=cached_content,
+                media_type=cached_type,
+                headers={
+                    "Cache-Control": "public, max-age=604800, immutable",
+                },
+            )
+
+    req_headers = {"User-Agent": "Onigiri-App/1.0"}
+    if "manga-chan.me" in clean_url:
+        req_headers["Referer"] = "https://im.manga-chan.me/"
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(clean_url, headers={"User-Agent": "Onigiri-App/1.0"})
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(clean_url, headers=req_headers)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Failed to load cover from remote host")
 
             content_type = resp.headers.get("content-type", "image/jpeg")
+            content_bytes = resp.content
+
+            async with _COVER_CACHE_LOCK:
+                _COVER_CACHE[clean_url] = (content_bytes, content_type)
+                if len(_COVER_CACHE) > _MAX_COVER_CACHE_ITEMS:
+                    _COVER_CACHE.popitem(last=False)
+
             return Response(
-                content=resp.content,
+                content=content_bytes,
                 media_type=content_type,
                 headers={
                     "Cache-Control": "public, max-age=604800, immutable",

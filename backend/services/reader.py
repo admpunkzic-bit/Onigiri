@@ -276,15 +276,68 @@ class ReaderService:
             if current_idx < len(all_chapters) - 1:
                 next_chapter_id = all_chapters[current_idx + 1]["id"]
 
-        # Fetch fresh/cached AtHome pages
-        athome_res = await self.get_athome_pages(
-            source_ch_id, data_saver=False, provider_id=provider_id
-        )
+        # Fetch fresh/cached AtHome pages (with automated transparent fallback)
+        athome_res = None
+        actual_chapter_id = chapter_id
+        actual_provider_id = provider_id
+        actual_source_ch_id = source_ch_id
+
+        try:
+            athome_res = await self.get_athome_pages(
+                source_ch_id, data_saver=False, provider_id=provider_id
+            )
+            if not athome_res.pages:
+                raise ValueError("Provider returned 0 pages")
+        except Exception as primary_err:
+            logger.warning(
+                "Primary fetch for chapter %d (source %s, %s) failed: %s. Looking for fallback...",
+                chapter_id, source_ch_id, provider_id, primary_err
+            )
+            cursor.execute(
+                """
+                SELECT c.id, c.source_chapter_id, ms.source_name
+                FROM chapters c
+                LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? 
+                  AND c.id != ?
+                  AND (
+                    (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
+                    OR (c.chapter_number = ?)
+                  )
+                  AND c.source_chapter_id IS NOT NULL
+                  AND c.language = 'ru'
+                ORDER BY c.id ASC
+                """,
+                (manga_id, chapter_id, ch_row["canonical_chapter_id"], ch_row["chapter_number"]),
+            )
+            candidates = cursor.fetchall()
+            for cand in candidates:
+                cand_source_id = cand["source_chapter_id"]
+                cand_provider = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+                try:
+                    alt_res = await self.get_athome_pages(
+                        cand_source_id, data_saver=False, provider_id=cand_provider
+                    )
+                    if alt_res and alt_res.pages:
+                        logger.info(
+                            "Transparent fallback: chapter %d -> alternative %d (%s) with %d pages",
+                            chapter_id, cand["id"], cand_provider, len(alt_res.pages)
+                        )
+                        athome_res = alt_res
+                        actual_chapter_id = cand["id"]
+                        actual_provider_id = cand_provider
+                        actual_source_ch_id = cand_source_id
+                        break
+                except Exception as cand_err:
+                    logger.debug("Alternative candidate %d failed: %s", cand["id"], cand_err)
+
+            if not athome_res or not athome_res.pages:
+                raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника")
 
         pages = [
             ChapterReaderPageItem(
                 page_number=p.page_number,
-                image_url=f"/api/manga/chapters/{chapter_id}/pages/{p.page_number}",
+                image_url=f"/api/manga/chapters/{actual_chapter_id}/pages/{p.page_number}",
             )
             for p in athome_res.pages
         ]
@@ -317,7 +370,7 @@ class ReaderService:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT c.source_chapter_id, c.language, ms.source_name
+            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.language, ms.source_name
             FROM chapters c
             LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
             WHERE c.id = ?
@@ -336,10 +389,39 @@ class ReaderService:
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID missing")
 
-        # Resolve pages (with automatic retry / refresh if expired)
-        athome_res = await self.get_athome_pages(
-            source_ch_id, data_saver=data_saver, provider_id=provider_id
-        )
+        # Resolve pages (with automatic retry / refresh if expired, and multi-source fallback)
+        try:
+            athome_res = await self.get_athome_pages(
+                source_ch_id, data_saver=data_saver, provider_id=provider_id
+            )
+        except Exception as prov_err:
+            logger.warning("Image stream: provider %s failed for chapter %d: %s. Trying fallback...", provider_id, chapter_id, prov_err)
+            cursor.execute(
+                """
+                SELECT c.id, c.source_chapter_id, ms.source_name
+                FROM chapters c
+                LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? 
+                  AND c.id != ?
+                  AND (
+                    (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
+                    OR (c.chapter_number = ?)
+                  )
+                  AND c.source_chapter_id IS NOT NULL
+                  AND c.language = 'ru'
+                ORDER BY c.id ASC
+                """,
+                (row["manga_id"], chapter_id, row["canonical_chapter_id"], row["chapter_number"]),
+            )
+            cand = cursor.fetchone()
+            if cand:
+                source_ch_id = cand["source_chapter_id"]
+                provider_id = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+                athome_res = await self.get_athome_pages(
+                    source_ch_id, data_saver=data_saver, provider_id=provider_id
+                )
+            else:
+                raise
 
         if not (1 <= page_number <= len(athome_res.pages)):
             raise HTTPException(

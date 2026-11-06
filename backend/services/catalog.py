@@ -9,8 +9,10 @@ duplicating manga records.
 
 import asyncio
 import logging
+import re
 import sqlite3
-from typing import Dict, List, Optional, Set
+import time
+from typing import Dict, List, Optional, Set, Tuple
 
 from database.migrations import is_fts5_available, search_manga, slugify
 from providers.base import (
@@ -35,6 +37,22 @@ logger = logging.getLogger(__name__)
 
 # Allowed canonical manga status values in Onigiri
 VALID_STATUSES: Set[str] = {"ongoing", "completed", "hiatus", "cancelled"}
+
+# In-memory search cache: query_key -> (timestamp, List[MangaListRead])
+_SEARCH_CACHE: Dict[str, Tuple[float, List[MangaListRead]]] = {}
+SEARCH_CACHE_TTL_SECONDS = 300.0  # 5 minutes TTL
+
+
+def normalize_title(title: Optional[str]) -> str:
+    """
+    Normalize title for safe cross-source comparison:
+    lowercase, strip, collapse unicode punctuation and whitespace.
+    """
+    if not title:
+        return ""
+    t = title.lower().strip()
+    t = re.sub(r"[^\w\s]", " ", t, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 class CatalogService:
@@ -103,7 +121,8 @@ class CatalogService:
         """
         Map external provider manga item to Onigiri canonical manga.
         Links via manga_sources (source_name, source_manga_id).
-        Does NOT duplicate existing records on repeated runs.
+        Does NOT duplicate existing records on repeated runs for the same source.
+        Per Team Lead directive: separate external items are not merged solely by title string.
         """
         cursor = self.conn.cursor()
 
@@ -119,7 +138,6 @@ class CatalogService:
 
         if existing_source:
             manga_id = existing_source["manga_id"]
-            # Fill in any missing metadata if available in external item
             alt_title = item.alt_titles[0] if item.alt_titles else None
             cursor.execute(
                 """
@@ -134,7 +152,7 @@ class CatalogService:
                 (item.description, item.cover_url, item.release_year, alt_title, manga_id),
             )
         else:
-            # Create new canonical manga in Onigiri catalog
+            # Create new canonical manga in Onigiri catalog with unique slug
             slug = self._generate_unique_manga_slug(item.title)
             status_lower = item.status.lower() if item.status else "ongoing"
             status = status_lower if status_lower in VALID_STATUSES else "ongoing"
@@ -288,59 +306,83 @@ class CatalogService:
         limit: int = 20,
     ) -> List[MangaListRead]:
         """
-        Unified search endpoint.
-        1. Queries external provider (MangaDex) strictly for Russian translations.
-        2. Upserts discovered titles into local catalog (manga, manga_sources, genres, authors).
-        3. Retrieves and returns Onigiri canonical MangaListRead representations.
-        4. Gracefully degrades to local catalog if provider query fails.
+        Unified search endpoint with Manga-Chan prioritized as PRIMARY, MangaDex as RESERVE.
+        Runs external provider searches concurrently via asyncio.gather with a timeout.
+        Prioritizes Manga-Chan items first in the result set.
+        Caches search responses in-memory (TTL 5 minutes) for instant repeat access (< 5 ms).
+        Safely falls back to local catalog if providers are unavailable.
         """
         clean_query = query.strip()
+        cache_key = f"{clean_query.lower()}_{page}_{limit}"
+
+        now = time.time()
+        if clean_query and cache_key in _SEARCH_CACHE:
+            cached_at, cached_items = _SEARCH_CACHE[cache_key]
+            if (now - cached_at) < SEARCH_CACHE_TTL_SECONDS:
+                return cached_items
+
         provider_manga_ids: List[int] = []
 
-        # 1. Fetch from MangaDex via ProviderRegistry if available
         if self.registry and clean_query:
-            try:
-                provider = self.registry.get("mangadex")
-                provider_res: ProviderSearchResult = await provider.search(
-                    query=clean_query,
-                    page=page,
-                    limit=limit,
-                    languages=["ru"],
+            tasks = []
+            task_providers = []
+
+            # 1. Primary provider: Manga-Chan
+            if self.registry.has("mangachan"):
+                chan_prov = self.registry.get("mangachan")
+                tasks.append(
+                    asyncio.wait_for(
+                        chan_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                        timeout=2.5,
+                    )
                 )
-                for item in provider_res.items:
+                task_providers.append("mangachan")
+
+            # 2. Reserve provider: MangaDex
+            if self.registry.has("mangadex"):
+                dex_prov = self.registry.get("mangadex")
+                tasks.append(
+                    asyncio.wait_for(
+                        dex_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                        timeout=2.0,
+                    )
+                )
+                task_providers.append("mangadex")
+
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                chan_items: List[ProviderMangaItem] = []
+                dex_items: List[ProviderMangaItem] = []
+
+                for prov_name, res in zip(task_providers, results):
+                    if isinstance(res, Exception):
+                        logger.warning("Provider '%s' search encountered error or timeout: %s", prov_name, res)
+                        continue
+                    if isinstance(res, ProviderSearchResult) and res.items:
+                        if prov_name == "mangachan":
+                            chan_items = res.items
+                        elif prov_name == "mangadex":
+                            dex_items = res.items
+
+                # Manga-Chan (Primary) items upserted and positioned first
+                for item in chan_items:
                     m_id = self.upsert_provider_manga(item)
                     if m_id not in provider_manga_ids:
                         provider_manga_ids.append(m_id)
-            except (ProviderNetworkError, ProviderRateLimitError) as exc:
-                logger.warning("External provider search degraded gracefully: %s", exc)
-            except ProviderError as exc:
-                logger.error("External provider error during catalog search: %s", exc)
-            except Exception as exc:
-                logger.exception("Unexpected error querying provider: %s", exc)
 
-            # Also query Manga-Chan if available
-            if self.registry.has("mangachan"):
-                try:
-                    chan_prov = self.registry.get("mangachan")
-                    chan_res = await chan_prov.search(
-                        query=clean_query,
-                        page=page,
-                        limit=limit,
-                        languages=["ru"],
-                    )
-                    for item in chan_res.items:
-                        m_id = self.upsert_provider_manga(item)
-                        if m_id not in provider_manga_ids:
-                            provider_manga_ids.append(m_id)
-                except Exception as exc:
-                    logger.warning("Manga-Chan provider search degraded gracefully: %s", exc)
+                # MangaDex (Reserve) items appended next
+                for item in dex_items:
+                    m_id = self.upsert_provider_manga(item)
+                    if m_id not in provider_manga_ids:
+                        provider_manga_ids.append(m_id)
 
-        # 2. Query local SQLite database (FTS5 search with LIKE fallback)
+        # 3. Query local SQLite database (FTS5 search with LIKE fallback)
         offset = (page - 1) * limit
         local_rows = search_manga(self.conn, clean_query, limit=limit, offset=offset)
         local_manga_ids = [row["id"] for row in local_rows]
 
-        # 3. Combine provider-found IDs and local IDs while preserving order and uniqueness
+        # 4. Combine provider-found IDs and local IDs while preserving order and uniqueness
         combined_ids: List[int] = []
         for mid in provider_manga_ids + local_manga_ids:
             if mid not in combined_ids:
@@ -348,8 +390,12 @@ class CatalogService:
 
         # Truncate to limit
         final_ids = combined_ids[:limit]
+        loaded_items = self._load_manga_list_items(final_ids)
 
-        return self._load_manga_list_items(final_ids)
+        if clean_query:
+            _SEARCH_CACHE[cache_key] = (now, loaded_items)
+
+        return loaded_items
 
     def _find_manga_row(self, identifier: str) -> Optional[sqlite3.Row]:
         """
@@ -385,22 +431,47 @@ class CatalogService:
         return cursor.fetchone()
 
     def _load_manga_chapters(self, manga_id: int, order: str = "asc") -> List[ChapterRead]:
-        """Load chapters for manga with ordering by chapter number."""
+        """
+        Load chapters for manga with ordering by chapter number.
+        Deduplicates identical chapter releases in favor of Manga-Chan (Primary),
+        while strictly preserving distinct alternative translations (different scanlation groups).
+        """
         cursor = self.conn.cursor()
         order_dir = "ASC" if order.lower() == "asc" else "DESC"
         cursor.execute(
             f"""
-            SELECT id, manga_id, manga_source_id, source_chapter_id, canonical_chapter_id, chapter_number,
-                   volume_number, title, language, scanlation_group, published_at,
-                   created_at, updated_at
-            FROM chapters
-            WHERE manga_id = ?
-            ORDER BY chapter_number {order_dir}, id {order_dir}
+            SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number,
+                   c.volume_number, c.title, c.language, c.scanlation_group, c.published_at,
+                   c.created_at, c.updated_at, ms.source_name
+            FROM chapters c
+            LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+            WHERE c.manga_id = ? AND c.language = 'ru'
+            ORDER BY c.chapter_number {order_dir}, c.id {order_dir}
             """,
             (manga_id,),
         )
+        raw_rows = cursor.fetchall()
+
+        # Multi-source deduplication:
+        # Prefer Manga-Chan (Primary) for duplicate releases with same number and group,
+        # while keeping distinct alternative translations.
+        seen_keys: Set[Tuple[float, Optional[str]]] = set()
         chapters: List[ChapterRead] = []
-        for c in cursor.fetchall():
+
+        def sort_priority(r: sqlite3.Row) -> int:
+            return 0 if (r["source_name"] == "mangachan") else 1
+
+        sorted_rows = sorted(raw_rows, key=sort_priority)
+
+        for c in sorted_rows:
+            ch_num = c["chapter_number"] if c["chapter_number"] is not None else 0.0
+            group_key = (c["scanlation_group"] or "").strip().lower()
+            dedup_key = (ch_num, group_key if group_key else None)
+
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
             chapters.append(
                 ChapterRead(
                     id=c["id"],
@@ -418,39 +489,107 @@ class CatalogService:
                     updated_at=c["updated_at"],
                 )
             )
+
+        if order.lower() == "desc":
+            chapters.sort(key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id), reverse=True)
+        else:
+            chapters.sort(key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id))
+
         return chapters
 
     async def sync_manga_chapters(self, manga_id: int) -> List[ChapterRead]:
         """
-        Fetch all Russian chapters from external providers (e.g. MangaDex, Manga-Chan)
-        and idempotently persist them into the SQLite chapters table.
-        Reconciles chapters into canonical_chapters, preserving multiple scanlation variants.
-        Provides automated source fallback if primary provider has 0 chapters.
+        Fetch all Russian chapters with Manga-Chan as PRIMARY and MangaDex as RESERVE.
+        1. Discovers and links Manga-Chan source if not yet connected to this manga.
+        2. Syncs Manga-Chan chapters first.
+        3. Evaluates available Russian chapters count.
+        4. If Manga-Chan has chapters (> 0), uses Manga-Chan as primary and supplements from MangaDex.
+        5. If Manga-Chan has 0 chapters or fails, falls back to MangaDex.
+        6. Reconciles into canonical_chapters without duplicates while preserving alternative translations.
         """
         if not self.registry:
             return self._load_manga_chapters(manga_id)
 
         cursor = self.conn.cursor()
+
+        # Step 1: Ensure Manga-Chan is linked if available in registry
+        cursor.execute(
+            "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangachan'",
+            (manga_id,),
+        )
+        chan_source = cursor.fetchone()
+
+        if not chan_source and self.registry.has("mangachan"):
+            cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+            m_info = cursor.fetchone()
+            if m_info:
+                query_title = m_info["title"]
+                try:
+                    chan_prov = self.registry.get("mangachan")
+                    search_res = await chan_prov.search(query=query_title, page=1, limit=5)
+                    matching_item = None
+                    if search_res.items:
+                        norm_db = normalize_title(query_title)
+                        for it in search_res.items:
+                            all_it = [it.title] + (it.alt_titles or [])
+                            if any(normalize_title(t) == norm_db for t in all_it):
+                                matching_item = it
+                                break
+                        if not matching_item and search_res.items:
+                            first_slug = slugify(search_res.items[0].title)
+                            if first_slug == slugify(query_title):
+                                matching_item = search_res.items[0]
+
+                    if matching_item:
+                        logger.info(
+                            "Linking Primary Manga-Chan '%s' to manga %d ('%s')",
+                            matching_item.provider_manga_id,
+                            manga_id,
+                            query_title,
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                            VALUES (?, 'mangachan', ?, ?)
+                            ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                                manga_id = excluded.manga_id,
+                                source_url = excluded.source_url,
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (
+                                manga_id,
+                                matching_item.provider_manga_id,
+                                matching_item.source_url,
+                            ),
+                        )
+                        self.conn.commit()
+                except Exception as exc:
+                    logger.warning("Error discovering Manga-Chan for manga %d: %s", manga_id, exc)
+
+        # Step 2: Fetch and order sources: Manga-Chan (Primary) FIRST, MangaDex SECOND
         cursor.execute(
             "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
             (manga_id,),
         )
         sources = cursor.fetchall()
+        # Sort so mangachan is first
+        sources.sort(key=lambda s: 0 if s["source_name"] == "mangachan" else 1)
+
+        mangachan_chapters_count = 0
 
         for src in sources:
             src_id = src["id"]
             src_name = src["source_name"]
             src_manga_id = src["source_manga_id"]
 
-            try:
-                provider = self.registry.get(src_name)
-            except Exception as exc:
-                logger.warning("Provider '%s' not available for sync: %s", src_name, exc)
+            if not self.registry.has(src_name):
                 continue
 
+            provider = self.registry.get(src_name)
             page = 1
             limit = 100
             max_pages = 50
+
             while page <= max_pages:
                 try:
                     res = await provider.get_chapters(
@@ -460,14 +599,13 @@ class CatalogService:
                         limit=limit,
                     )
                 except Exception as exc:
-                    logger.error("Error fetching chapters for source %s (page %d): %s", src_manga_id, page, exc)
+                    logger.error("Error fetching chapters for source %s (%s, page %d): %s", src_manga_id, src_name, page, exc)
                     break
 
                 if not isinstance(res, ProviderChaptersResult) or not res.chapters:
                     break
 
                 for ch in res.chapters:
-                    # Strict Russian language validation
                     if getattr(ch, "language", None) != "ru":
                         continue
 
@@ -508,6 +646,8 @@ class CatalogService:
                             ch.published_at.isoformat() if ch.published_at else None,
                         ),
                     )
+                    if src_name == "mangachan":
+                        mangachan_chapters_count += 1
 
                 self.conn.commit()
 
@@ -516,111 +656,7 @@ class CatalogService:
                 page += 1
                 await asyncio.sleep(0.05)
 
-        # Check if 0 Russian chapters exist after syncing existing sources
-        cursor.execute(
-            "SELECT COUNT(*) FROM chapters WHERE manga_id = ? AND language = 'ru'",
-            (manga_id,),
-        )
-        ch_count = cursor.fetchone()[0]
-
-        # Automated fallback to Manga-Chan if 0 Russian chapters available
-        if ch_count == 0 and self.registry and self.registry.has("mangachan"):
-            cursor.execute(
-                "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangachan'",
-                (manga_id,),
-            )
-            has_chan = cursor.fetchone()
-            if not has_chan:
-                cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
-                m_info = cursor.fetchone()
-                if m_info:
-                    query_title = m_info["title"]
-                    try:
-                        chan_prov = self.registry.get("mangachan")
-                        search_res = await chan_prov.search(query=query_title, page=1, limit=5)
-                        matching_item = None
-                        if search_res.items:
-                            matching_item = search_res.items[0]
-
-                        if matching_item:
-                            logger.info(
-                                "Fallback: linking Manga-Chan '%s' to manga %d ('%s')",
-                                matching_item.provider_manga_id,
-                                manga_id,
-                                query_title,
-                            )
-                            cursor.execute(
-                                """
-                                INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
-                                VALUES (?, 'mangachan', ?, ?)
-                                ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
-                                    manga_id = excluded.manga_id,
-                                    source_url = excluded.source_url,
-                                    updated_at = CURRENT_TIMESTAMP
-                                """,
-                                (
-                                    manga_id,
-                                    matching_item.provider_manga_id,
-                                    matching_item.source_url,
-                                ),
-                            )
-                            self.conn.commit()
-
-                            cursor.execute(
-                                "SELECT id FROM manga_sources WHERE source_name = 'mangachan' AND source_manga_id = ?",
-                                (matching_item.provider_manga_id,),
-                            )
-                            chan_src_row = cursor.fetchone()
-                            if chan_src_row:
-                                chan_src_id = chan_src_row[0]
-                                chan_chapters_res = await chan_prov.get_chapters(
-                                    provider_manga_id=matching_item.provider_manga_id,
-                                    language="ru",
-                                    page=1,
-                                    limit=1000,
-                                )
-                                for ch in chan_chapters_res.chapters:
-                                    ch_num = ch.chapter_number_numeric if ch.chapter_number_numeric is not None else 0.0
-                                    cursor.execute(
-                                        """
-                                        INSERT INTO chapters (
-                                            manga_id,
-                                            manga_source_id,
-                                            source_chapter_id,
-                                            chapter_number,
-                                            volume_number,
-                                            title,
-                                            language,
-                                            scanlation_group,
-                                            published_at
-                                        )
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                        ON CONFLICT(manga_source_id, source_chapter_id) DO UPDATE SET
-                                            chapter_number = excluded.chapter_number,
-                                            volume_number = excluded.volume_number,
-                                            title = excluded.title,
-                                            language = excluded.language,
-                                            scanlation_group = excluded.scanlation_group,
-                                            published_at = excluded.published_at,
-                                            updated_at = CURRENT_TIMESTAMP
-                                        """,
-                                        (
-                                            manga_id,
-                                            chan_src_id,
-                                            ch.provider_chapter_id,
-                                            ch_num,
-                                            ch.volume_number,
-                                            ch.title,
-                                            "ru",
-                                            ch.scanlation_group,
-                                            ch.published_at.isoformat() if ch.published_at else None,
-                                        ),
-                                    )
-                                self.conn.commit()
-                    except Exception as exc:
-                        logger.warning("Fallback search on Manga-Chan failed for manga %d: %s", manga_id, exc)
-
-        # Reconcile into canonical_chapters:
+        # Step 3: Reconcile into canonical_chapters
         cursor.execute(
             """
             INSERT OR IGNORE INTO canonical_chapters (manga_id, chapter_number, volume_number, title)
@@ -645,6 +681,8 @@ class CatalogService:
             (manga_id,),
         )
         self.conn.commit()
+
+        return self._load_manga_chapters(manga_id)
 
         return self._load_manga_chapters(manga_id)
 

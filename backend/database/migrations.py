@@ -698,6 +698,38 @@ def _migration_008_canonical_chapters(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_009_catalog_indexes(conn: sqlite3.Connection) -> None:
+    """
+    Migration 009: Add composite and filtering indexes for high-performance
+    catalog sorting, collections, and multi-criteria search.
+    Eliminates temporary B-trees in SQLite query planning.
+    """
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(manga)")
+    cols = {row[1] for row in cursor.fetchall()}
+
+    if "rating" in cols and "views_count" in cols:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manga_popularity ON manga(rating DESC, views_count DESC)"
+        )
+    if "status" in cols:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manga_status ON manga(status)"
+        )
+    if "type" in cols:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manga_type ON manga(type)"
+        )
+    if "release_year" in cols:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manga_release_year ON manga(release_year)"
+        )
+    if "created_at" in cols:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_manga_created_at ON manga(created_at DESC)"
+        )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -708,6 +740,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "006_user_reading_progress", _migration_006_user_reading_progress),
     (7, "007_user_library", _migration_007_user_library),
     (8, "008_canonical_chapters", _migration_008_canonical_chapters),
+    (9, "009_catalog_indexes", _migration_009_catalog_indexes),
 ]
 
 
