@@ -730,6 +730,113 @@ def _migration_009_catalog_indexes(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migration_010_deduplicate_manga_and_backfill_covers(conn: sqlite3.Connection) -> None:
+    """
+    Migration 010: Deduplicate manga titles, unify multi-source references, and backfill covers.
+    - Merges duplicate manga records created by multi-provider searches into single canonical entities.
+    - Preserves all associated chapters, reading progress, favorites, genres, and authors.
+    - Backfills cover URLs from alternative provider records.
+    """
+    cursor = conn.cursor()
+
+    # Find duplicate titles
+    cursor.execute("SELECT title FROM manga GROUP BY title HAVING COUNT(*) > 1")
+    dup_titles = [r[0] for r in cursor.fetchall()]
+
+    for title in dup_titles:
+        cursor.execute(
+            "SELECT id, cover_url, description, original_title FROM manga WHERE title = ? ORDER BY id ASC",
+            (title,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            continue
+
+        # Prefer row with non-empty cover_url
+        with_cover = [r for r in rows if r[1] and str(r[1]).strip()]
+        canonical_row = with_cover[0] if with_cover else rows[0]
+        canonical_id = canonical_row[0]
+
+        # Consolidate metadata into canonical row
+        best_cover = canonical_row[1]
+        best_desc = canonical_row[2]
+        best_orig = canonical_row[3]
+
+        for r in rows:
+            if not best_cover and r[1] and str(r[1]).strip():
+                best_cover = r[1]
+            if not best_desc and r[2] and str(r[2]).strip():
+                best_desc = r[2]
+            if not best_orig and r[3] and str(r[3]).strip():
+                best_orig = r[3]
+
+        cursor.execute(
+            """
+            UPDATE manga
+            SET cover_url = ?, description = ?, original_title = ?
+            WHERE id = ?
+            """,
+            (best_cover, best_desc, best_orig, canonical_id),
+        )
+
+        # Repoint relations for each duplicate
+        for r in rows:
+            dup_id = r[0]
+            if dup_id == canonical_id:
+                continue
+
+            cursor.execute(
+                "UPDATE OR IGNORE manga_sources SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+            cursor.execute("DELETE FROM manga_sources WHERE manga_id = ?", (dup_id,))
+
+            cursor.execute(
+                "UPDATE chapters SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+
+            cursor.execute(
+                "UPDATE OR IGNORE user_reading_progress SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+            cursor.execute("DELETE FROM user_reading_progress WHERE manga_id = ?", (dup_id,))
+
+            cursor.execute(
+                "UPDATE OR IGNORE user_library SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+            cursor.execute("DELETE FROM user_library WHERE manga_id = ?", (dup_id,))
+
+            cursor.execute(
+                "UPDATE OR IGNORE manga_genres SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+            cursor.execute("DELETE FROM manga_genres WHERE manga_id = ?", (dup_id,))
+
+            cursor.execute(
+                "UPDATE OR IGNORE manga_authors SET manga_id = ? WHERE manga_id = ?",
+                (canonical_id, dup_id),
+            )
+            cursor.execute("DELETE FROM manga_authors WHERE manga_id = ?", (dup_id,))
+
+            cursor.execute("DELETE FROM manga WHERE id = ?", (dup_id,))
+
+    # Sync FTS index if available
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manga_search_index'")
+    if cursor.fetchone():
+        try:
+            cursor.execute("DELETE FROM manga_search_index")
+            cursor.execute(
+                """
+                INSERT INTO manga_search_index (manga_id, title, original_title, description)
+                SELECT id, title, original_title, description FROM manga
+                """
+            )
+        except Exception as fts_err:
+            logger.warning(f"FTS5 re-indexing skipped: {fts_err}")
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -741,6 +848,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (7, "007_user_library", _migration_007_user_library),
     (8, "008_canonical_chapters", _migration_008_canonical_chapters),
     (9, "009_catalog_indexes", _migration_009_catalog_indexes),
+    (10, "010_deduplicate_manga_and_backfill_covers", _migration_010_deduplicate_manga_and_backfill_covers),
 ]
 
 
@@ -749,6 +857,11 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     Run pending migrations sequentially inside transactions.
     Idempotent and safe for existing databases.
     """
+    try:
+        conn.create_function("lower", 1, lambda s: str(s).lower() if s is not None else "")
+    except Exception:
+        pass
+
     was_fk_on = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
     if was_fk_on:
         conn.execute("PRAGMA foreign_keys = OFF")

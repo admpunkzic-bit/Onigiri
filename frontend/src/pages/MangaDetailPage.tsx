@@ -20,18 +20,10 @@ import {
   fetchMangaDetail,
   fetchReadingProgress,
   syncMangaChapters,
+  resolveCoverUrl,
 } from '../services/api'
 import type { ChapterItem, MangaDetail, ReadingProgress } from '../types/manga'
 import { useLibrary } from '../context/LibraryContext'
-
-function resolveCoverUrl(url?: string | null): string | null {
-  if (!url) return null
-  if (url.startsWith('https://uploads.mangadex.org/') || url.includes('manga-chan.me')) {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
-    return `${apiBase}/manga/cover/proxy?url=${encodeURIComponent(url)}`
-  }
-  return url
-}
 
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return ''

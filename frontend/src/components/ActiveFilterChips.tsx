@@ -53,7 +53,11 @@ export default function ActiveFilterChips({
   if (!hasFilters) return null
 
   const getGenreName = (slugOrName: string) => {
-    const found = genres.find((g) => g.slug === slugOrName || g.name === slugOrName)
+    const found = genres.find(
+      (g) =>
+        g.slug.toLowerCase() === slugOrName.toLowerCase() ||
+        g.name.toLowerCase() === slugOrName.toLowerCase()
+    )
     return found ? found.name : slugOrName
   }
 

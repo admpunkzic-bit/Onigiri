@@ -11,7 +11,7 @@ import socket
 import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 
 import httpx
 from fastapi import HTTPException
@@ -44,14 +44,15 @@ _ATHOME_IN_FLIGHT: Dict[str, asyncio.Task] = {}
 _ATHOME_LOCK = asyncio.Lock()
 
 
-def validate_and_resolve_url_ssrf(target_url: str) -> None:
+def validate_and_resolve_url_ssrf(target_url: str) -> str:
     """
     Validate target URL against SSRF vulnerabilities:
-    - Scheme must be strictly HTTPS.
-    - Hostname must strictly match authorized MangaDex domains.
+    - Auto-upgrades HTTP scheme to HTTPS for allowlisted domains.
+    - Hostname must strictly match authorized MangaDex and Manga-Chan domains.
     - No credentials (user:pass@) in URL.
     - DNS resolution must not resolve to loopback, private, link-local,
       cloud metadata (169.254.169.254), multicast, or reserved IPs.
+    Returns the normalized HTTPS URL string.
     """
     if not isinstance(target_url, str) or not target_url.strip():
         raise HTTPException(status_code=400, detail="Invalid target URL: empty or missing")
@@ -79,7 +80,7 @@ def validate_and_resolve_url_ssrf(target_url: str) -> None:
     if not is_allowed_domain:
         raise HTTPException(
             status_code=403,
-            detail=f"SSRF protection: Domain '{hostname}' is not in authorized MangaDex network",
+            detail=f"SSRF protection: Domain '{hostname}' is not in authorized CDN network",
         )
 
     # DNS Resolution and IP Address Filtering (Prevent DNS Rebinding / Intranet probing)
@@ -113,6 +114,8 @@ def validate_and_resolve_url_ssrf(target_url: str) -> None:
                 status_code=403,
                 detail=f"SSRF protection: Connection to private or restricted IP '{ip_str}' is forbidden",
             )
+
+    return clean_url
 
 
 class ReaderService:
@@ -394,106 +397,126 @@ class ReaderService:
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID missing")
 
-        # Resolve pages (with automatic retry / refresh if expired, and multi-source fallback)
-        try:
-            athome_res = await self.get_athome_pages(
-                source_ch_id, data_saver=data_saver, provider_id=provider_id
-            )
-        except Exception as prov_err:
-            logger.warning("Image stream: provider %s failed for chapter %d: %s. Trying fallback...", provider_id, chapter_id, prov_err)
-            cursor.execute(
-                """
-                SELECT c.id, c.source_chapter_id, ms.source_name
-                FROM chapters c
-                LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
-                WHERE c.manga_id = ? 
-                  AND c.id != ?
-                  AND (
-                    (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
-                    OR (c.chapter_number = ?)
-                  )
-                  AND c.source_chapter_id IS NOT NULL
-                  AND c.language = 'ru'
-                ORDER BY c.id ASC
-                """,
-                (row["manga_id"], chapter_id, row["canonical_chapter_id"], row["chapter_number"]),
-            )
-            cand = cursor.fetchone()
-            if cand:
-                source_ch_id = cand["source_chapter_id"]
-                provider_id = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+        # Find all fallback candidate chapters in case primary source fails
+        cursor.execute(
+            """
+            SELECT c.id, c.source_chapter_id, ms.source_name
+            FROM chapters c
+            LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+            WHERE c.manga_id = ?
+              AND c.id != ?
+              AND (
+                (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
+                OR (c.chapter_number = ?)
+              )
+              AND c.source_chapter_id IS NOT NULL
+              AND c.language = 'ru'
+            ORDER BY c.id ASC
+            """,
+            (row["manga_id"], chapter_id, row["canonical_chapter_id"], row["chapter_number"]),
+        )
+        alternative_chapters = cursor.fetchall()
+
+        # Build candidate queue: primary first, then alternatives
+        candidates = [(source_ch_id, provider_id)]
+        for alt in alternative_chapters:
+            alt_prov = alt["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+            candidates.append((alt["source_chapter_id"], alt_prov))
+
+        last_error = None
+        for current_ch_id, current_prov in candidates:
+            try:
                 athome_res = await self.get_athome_pages(
-                    source_ch_id, data_saver=data_saver, provider_id=provider_id
+                    current_ch_id, data_saver=data_saver, provider_id=current_prov
                 )
-            else:
-                raise
-
-        if not (1 <= page_number <= len(athome_res.pages)):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Page number {page_number} out of bounds (1-{len(athome_res.pages)})",
-            )
-
-        target_url = athome_res.pages[page_number - 1].image_url
-
-        # Enhanced SSRF protection validation
-        validate_and_resolve_url_ssrf(target_url)
-
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"
-        }
-        if provider_id == "mangachan" or ".manga-chan.me" in target_url:
-            req_headers["Referer"] = f"https://im.manga-chan.me/online/{source_ch_id}.html"
-
-        try:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
-                resp = await client.get(target_url, headers=req_headers)
-
-                # If MangaDex@Home token expired (404/504), refresh AtHome server once and retry
-                if provider_id == "mangadex" and resp.status_code in (404, 502, 504):
-                    logger.info("AtHome node returned %d, refreshing server token for %s", resp.status_code, source_ch_id)
-                    fresh_res = await self.get_athome_pages(
-                        source_ch_id, data_saver=data_saver, force_refresh=True, provider_id=provider_id
-                    )
-                    if 1 <= page_number <= len(fresh_res.pages):
-                        target_url = fresh_res.pages[page_number - 1].image_url
-                        validate_and_resolve_url_ssrf(target_url)
-                        resp = await client.get(target_url, headers=req_headers)
-
-                # Safe redirect handling with full SSRF re-validation
-                if resp.status_code in (301, 302, 307, 308):
-                    redirect_target = resp.headers.get("location")
-                    if not redirect_target:
-                        raise HTTPException(status_code=502, detail="SSRF protection: Redirect without Location header")
-                    validate_and_resolve_url_ssrf(redirect_target)
-                    resp = await client.get(redirect_target, headers=req_headers)
-
-                if resp.status_code != 200:
+                if not (1 <= page_number <= len(athome_res.pages)):
                     raise HTTPException(
-                        status_code=resp.status_code,
-                        detail=f"Failed to fetch page from image server (HTTP {resp.status_code})",
+                        status_code=404,
+                        detail=f"Page number {page_number} out of bounds (1-{len(athome_res.pages)})",
                     )
 
-                raw_bytes = resp.content
-                if len(raw_bytes) > 15 * 1024 * 1024:
-                    raise HTTPException(status_code=502, detail="Image payload exceeds 15MB limit")
+                raw_target_url = athome_res.pages[page_number - 1].image_url
+                if raw_target_url.startswith("http://"):
+                    raw_target_url = "https://" + raw_target_url[7:]
+                target_url = validate_and_resolve_url_ssrf(raw_target_url)
 
-                content_type = resp.headers.get("content-type", "image/jpeg")
+                req_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"
+                }
+                if current_prov == "mangachan" or ".manga-chan.me" in target_url:
+                    req_headers["Referer"] = f"https://im.manga-chan.me/online/{current_ch_id}.html"
 
-                # Sniff binary magic bytes for image formats
-                if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
-                    content_type = "image/avif"
-                elif len(raw_bytes) >= 3 and raw_bytes[:3] == b"\xff\xd8\xff":
-                    content_type = "image/jpeg"
-                elif len(raw_bytes) >= 8 and raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-                    content_type = "image/png"
-                elif len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
-                    content_type = "image/webp"
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+                    current_url = target_url
+                    max_redirects = 5
+                    redirect_count = 0
+                    resp = None
 
-                return raw_bytes, content_type
+                    while redirect_count < max_redirects:
+                        resp = await client.get(current_url, headers=req_headers)
 
-        except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail=f"Remote network error: {exc}") from exc
+                        # If MangaDex@Home token expired (404/502/504), refresh AtHome server once and retry
+                        if current_prov == "mangadex" and resp.status_code in (404, 502, 504) and redirect_count == 0:
+                            logger.info("AtHome node returned %d, refreshing server token for %s", resp.status_code, current_ch_id)
+                            fresh_res = await self.get_athome_pages(
+                                current_ch_id, data_saver=data_saver, force_refresh=True, provider_id=current_prov
+                            )
+                            if 1 <= page_number <= len(fresh_res.pages):
+                                fresh_url = fresh_res.pages[page_number - 1].image_url
+                                if fresh_url.startswith("http://"):
+                                    fresh_url = "https://" + fresh_url[7:]
+                                current_url = validate_and_resolve_url_ssrf(fresh_url)
+                                resp = await client.get(current_url, headers=req_headers)
+
+                        # Safe redirect handling with full SSRF re-validation and urljoin for relative targets
+                        if resp.status_code in (301, 302, 303, 307, 308):
+                            redirect_target = resp.headers.get("location")
+                            if not redirect_target:
+                                raise HTTPException(status_code=502, detail="SSRF protection: Redirect without Location header")
+                            resolved_target = urljoin(current_url, redirect_target)
+                            if resolved_target.startswith("http://"):
+                                resolved_target = "https://" + resolved_target[7:]
+                            current_url = validate_and_resolve_url_ssrf(resolved_target)
+                            redirect_count += 1
+                            continue
+
+                        break
+
+                    if not resp or resp.status_code != 200:
+                        code = resp.status_code if resp else 502
+                        raise HTTPException(
+                            status_code=code,
+                            detail=f"Failed to fetch page from image server (HTTP {code})",
+                        )
+
+                    raw_bytes = resp.content
+                    if len(raw_bytes) > 15 * 1024 * 1024:
+                        raise HTTPException(status_code=502, detail="Image payload exceeds 15MB limit")
+
+                    content_type = resp.headers.get("content-type", "image/jpeg")
+
+                    # Sniff binary magic bytes for image formats
+                    if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
+                        content_type = "image/avif"
+                    elif len(raw_bytes) >= 3 and raw_bytes[:3] == b"\xff\xd8\xff":
+                        content_type = "image/jpeg"
+                    elif len(raw_bytes) >= 8 and raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                        content_type = "image/png"
+                    elif len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+                        content_type = "image/webp"
+
+                    return raw_bytes, content_type
+
+            except Exception as exc:
+                logger.warning("Error fetching chapter page (%s, %s): %s", current_prov, current_ch_id, exc)
+                last_error = exc
+                continue
+
+        if last_error:
+            if isinstance(last_error, HTTPException):
+                raise last_error
+            raise HTTPException(status_code=502, detail=f"Image delivery failed across available providers: {last_error}")
+        raise HTTPException(status_code=502, detail="No valid image stream could be established")
 
     def get_user_progress(
         self,
@@ -613,12 +636,26 @@ class ReaderService:
         rows = cursor.fetchall()
         items: List[ReadingHistoryItemRead] = []
         for r in rows:
+            cover = r["cover_url"]
+            if not cover:
+                cursor.execute(
+                    """
+                    SELECT cover_url FROM manga
+                    WHERE (title = ? OR slug = ?) AND cover_url IS NOT NULL AND cover_url != ''
+                    LIMIT 1
+                    """,
+                    (r["manga_title"], r["manga_slug"]),
+                )
+                alt_cover_row = cursor.fetchone()
+                if alt_cover_row:
+                    cover = alt_cover_row["cover_url"]
+
             items.append(
                 ReadingHistoryItemRead(
                     manga_id=r["manga_id"],
                     manga_slug=r["manga_slug"] or str(r["manga_id"]),
                     manga_title=r["manga_title"],
-                    cover_url=r["cover_url"],
+                    cover_url=cover,
                     manga_status=r["manga_status"] or "unknown",
                     chapter_id=r["chapter_id"],
                     chapter_number=float(r["chapter_number"]) if r["chapter_number"] is not None else None,

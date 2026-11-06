@@ -3,19 +3,10 @@ import { Link } from 'react-router-dom'
 import { BookMarked, Star } from 'lucide-react'
 import type { MangaItem } from '../types/manga'
 import { useLibrary } from '../context/LibraryContext'
+import { resolveCoverUrl } from '../services/api'
 
 interface MangaCardProps {
   manga: MangaItem
-}
-
-function resolveCoverUrl(url?: string | null): string | null {
-  if (!url) return null
-  // MangaDex and Manga-Chan anti-hotlinking bypass via Onigiri backend proxy.
-  if (url.startsWith('https://uploads.mangadex.org/') || url.includes('manga-chan.me')) {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
-    return `${apiBase}/manga/cover/proxy?url=${encodeURIComponent(url)}`
-  }
-  return url
 }
 
 export default function MangaCard({ manga }: MangaCardProps) {

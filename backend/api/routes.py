@@ -38,7 +38,7 @@ from schemas.manga import (
     ReadingProgressUpdate,
 )
 from services.catalog import CatalogService
-from services.reader import ReaderService
+from services.reader import ReaderService, validate_and_resolve_url_ssrf
 
 router = APIRouter()
 
@@ -157,13 +157,6 @@ _COVER_CACHE: OrderedDict[str, Tuple[bytes, str]] = OrderedDict()
 _MAX_COVER_CACHE_ITEMS = 500
 _COVER_CACHE_LOCK = asyncio.Lock()
 
-ALLOWED_COVER_PREFIXES = (
-    "https://uploads.mangadex.org/",
-    "https://imgcover.manga-chan.me/",
-    "https://thumbs.manga-chan.me/",
-)
-
-
 @router.get("/manga/cover/proxy")
 async def get_manga_cover(
     url: str = Query(..., description="External cover image URL"),
@@ -171,11 +164,17 @@ async def get_manga_cover(
     """
     Safely proxy external manga covers to bypass anti-hotlinking and bot-challenge protections.
     Supports in-memory LRU caching to eliminate redundant outbound requests.
-    Restricted strictly to authorized MangaDex and Manga-Chan CDN hosts.
+    Restricted strictly to authorized MangaDex and Manga-Chan CDN hosts with full SSRF validation.
     """
     clean_url = url.strip()
-    if not any(clean_url.startswith(prefix) for prefix in ALLOWED_COVER_PREFIXES):
+    if clean_url.startswith("http://"):
+        clean_url = "https://" + clean_url[7:]
+    try:
+        clean_url = validate_and_resolve_url_ssrf(clean_url)
+    except HTTPException:
         raise HTTPException(status_code=400, detail="Invalid cover URL: host not permitted")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cover URL: {exc}")
 
     async with _COVER_CACHE_LOCK:
         if clean_url in _COVER_CACHE:
@@ -189,12 +188,12 @@ async def get_manga_cover(
                 },
             )
 
-    req_headers = {"User-Agent": "Onigiri-App/1.0"}
+    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"}
     if "manga-chan.me" in clean_url:
         req_headers["Referer"] = "https://im.manga-chan.me/"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             resp = await client.get(clean_url, headers=req_headers)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Failed to load cover from remote host")

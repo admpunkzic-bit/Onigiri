@@ -200,7 +200,9 @@ export default function SearchFilterDrawer({
             </div>
             <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto pr-1">
               {filteredGenres.map((g) => {
-                const isSelected = selectedGenres.includes(g.slug) || selectedGenres.includes(g.name)
+                const isSelected = selectedGenres.some(
+                  (s) => s.toLowerCase() === g.slug.toLowerCase() || s.toLowerCase() === g.name.toLowerCase()
+                )
                 return (
                   <button
                     key={g.id}

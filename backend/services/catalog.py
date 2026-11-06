@@ -142,10 +142,10 @@ class CatalogService:
             cursor.execute(
                 """
                 UPDATE manga
-                SET description = COALESCE(description, ?),
-                    cover_url = COALESCE(cover_url, ?),
-                    release_year = COALESCE(release_year, ?),
-                    original_title = COALESCE(original_title, ?),
+                SET description = COALESCE(manga.description, ?),
+                    cover_url = CASE WHEN manga.cover_url IS NULL OR manga.cover_url = '' THEN ? ELSE manga.cover_url END,
+                    release_year = COALESCE(manga.release_year, ?),
+                    original_title = COALESCE(manga.original_title, ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
@@ -436,7 +436,7 @@ class CatalogService:
                     m.id IN (
                         SELECT mg.manga_id FROM manga_genres mg
                         JOIN genres g ON g.id = mg.genre_id
-                        WHERE g.slug = ? OR LOWER(g.name) = LOWER(?)
+                        WHERE LOWER(g.slug) = LOWER(?) OR LOWER(g.name) = LOWER(?)
                     )
                     """
                 )
@@ -449,11 +449,11 @@ class CatalogService:
                 m.id NOT IN (
                     SELECT mg_ex.manga_id FROM manga_genres mg_ex
                     JOIN genres g_ex ON g_ex.id = mg_ex.genre_id
-                    WHERE g_ex.slug IN ({ph}) OR LOWER(g_ex.name) IN ({ph})
+                    WHERE LOWER(g_ex.slug) IN ({ph}) OR LOWER(g_ex.name) IN ({ph})
                 )
                 """
             )
-            params.extend(clean_ex_genres)
+            params.extend([g.lower() for g in clean_ex_genres])
             params.extend([g.lower() for g in clean_ex_genres])
 
         if manga_type:
@@ -502,10 +502,18 @@ class CatalogService:
         cursor.execute(sql, params)
         local_manga_ids = [row["id"] for row in cursor.fetchall()]
 
-        combined_ids: List[int] = []
-        for mid in provider_manga_ids + local_manga_ids:
-            if mid not in combined_ids:
-                combined_ids.append(mid)
+        if clean_genres or clean_ex_genres or manga_type or status or author or release_year:
+            # When filter criteria are active, keep only items satisfying all query clauses
+            matching_provider_ids = [mid for mid in provider_manga_ids if mid in local_manga_ids]
+            combined_ids: List[int] = []
+            for mid in matching_provider_ids + local_manga_ids:
+                if mid not in combined_ids:
+                    combined_ids.append(mid)
+        else:
+            combined_ids: List[int] = []
+            for mid in provider_manga_ids + local_manga_ids:
+                if mid not in combined_ids:
+                    combined_ids.append(mid)
 
         final_ids = combined_ids[:limit]
         loaded_items = self._load_manga_list_items(final_ids)
@@ -762,6 +770,15 @@ class CatalogService:
                                     matching_dex.source_url,
                                 ),
                             )
+                            if matching_dex.cover_url:
+                                cursor.execute(
+                                    """
+                                    UPDATE manga
+                                    SET cover_url = ?
+                                    WHERE id = ? AND (cover_url IS NULL OR cover_url = '')
+                                    """,
+                                    (matching_dex.cover_url, manga_id),
+                                )
                             self.conn.commit()
                 except Exception as exc:
                     logger.debug("MangaDex supplement search error: %s", exc)
@@ -976,13 +993,29 @@ class CatalogService:
         else:
             chapters = self._load_manga_chapters(manga_id)
 
+        current_cover = row["cover_url"]
+        if not current_cover:
+            cursor.execute(
+                """
+                SELECT cover_url FROM manga
+                WHERE (title = ? OR slug = ?) AND cover_url IS NOT NULL AND cover_url != ''
+                LIMIT 1
+                """,
+                (row["title"], row["slug"]),
+            )
+            alt_cover = cursor.fetchone()
+            if alt_cover and alt_cover["cover_url"]:
+                current_cover = alt_cover["cover_url"]
+                cursor.execute("UPDATE manga SET cover_url = ? WHERE id = ?", (current_cover, manga_id))
+                self.conn.commit()
+
         return MangaDetailRead(
             id=row["id"],
             title=row["title"],
             slug=row["slug"],
             original_title=row["original_title"],
             description=row["description"],
-            cover_url=row["cover_url"],
+            cover_url=current_cover,
             banner_url=row["banner_url"],
             status=row["status"],
             type=row["type"],

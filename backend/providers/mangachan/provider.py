@@ -94,6 +94,8 @@ class MangaChanProvider(BaseMangaProvider):
             img_match = re.search(r'<img[^>]+src=[\'"](https?://[^\'"]*(?:manga-chan|imgcover|thumbs)[^\'"]*)[\'"]', img_snippet)
             if img_match:
                 cover_url = img_match.group(1)
+                if cover_url.startswith("http://"):
+                    cover_url = "https://" + cover_url[7:]
 
             results.append(
                 ProviderMangaItem(
@@ -152,6 +154,8 @@ class MangaChanProvider(BaseMangaProvider):
             alt_cover = re.search(r'src=[\'"](https?://imgcover\.[^\'"]+)[\'"]', html_content)
             if alt_cover:
                 cover_url = alt_cover.group(1)
+        if cover_url and cover_url.startswith("http://"):
+            cover_url = "https://" + cover_url[7:]
 
         # Status
         status = "ongoing"

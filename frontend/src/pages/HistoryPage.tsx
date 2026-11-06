@@ -14,16 +14,8 @@ import {
   clearReadingHistory,
   deleteReadingHistoryItem,
   fetchReadingHistory,
+  resolveCoverUrl,
 } from '../services/api'
-
-function resolveCoverUrl(url?: string | null): string | null {
-  if (!url) return null
-  if (url.startsWith('https://uploads.mangadex.org/') || url.includes('manga-chan.me')) {
-    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
-    return `${apiBase}/manga/cover/proxy?url=${encodeURIComponent(url)}`
-  }
-  return url
-}
 
 function formatRelativeDate(isoString: string): string {
   try {

@@ -14,8 +14,18 @@ import type {
   ReadingProgress,
 } from '../types/manga'
 
-const API_BASE_URL: string =
+export const API_BASE_URL: string =
   import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
+
+export function resolveCoverUrl(url?: string | null): string | null {
+  if (!url) return null
+  const clean = url.trim()
+  if (!clean) return null
+  if (clean.includes('uploads.mangadex.org') || clean.includes('manga-chan.me')) {
+    return `${API_BASE_URL}/manga/cover/proxy?url=${encodeURIComponent(clean)}`
+  }
+  return clean
+}
 
 // ── Response types ──────────────────────────────────────────
 

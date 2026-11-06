@@ -160,10 +160,31 @@ export default function SearchPage() {
     updateUrlParams(query, author, selectedType, '', selectedSort, selectedGenres)
   }
 
-  const handleToggleGenre = (slug: string) => {
-    const updated = selectedGenres.includes(slug)
-      ? selectedGenres.filter((s) => s !== slug)
-      : [...selectedGenres, slug]
+  const handleToggleGenre = (term: string) => {
+    const cleanTerm = term.trim().toLowerCase()
+    const matching = genresList.find(
+      (g) => g.slug.toLowerCase() === cleanTerm || g.name.toLowerCase() === cleanTerm
+    )
+    const canonicalSlug = matching ? matching.slug : term
+
+    const exists = selectedGenres.some(
+      (s) =>
+        s.toLowerCase() === cleanTerm ||
+        (matching &&
+          (s.toLowerCase() === matching.slug.toLowerCase() ||
+            s.toLowerCase() === matching.name.toLowerCase()))
+    )
+
+    const updated = exists
+      ? selectedGenres.filter(
+          (s) =>
+            s.toLowerCase() !== cleanTerm &&
+            (!matching ||
+              (s.toLowerCase() !== matching.slug.toLowerCase() &&
+                s.toLowerCase() !== matching.name.toLowerCase()))
+        )
+      : [...selectedGenres, canonicalSlug]
+
     setSelectedGenres(updated)
     updateUrlParams(query, author, selectedType, selectedStatus, selectedSort, updated)
   }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AlertCircle, RefreshCw } from 'lucide-react'
+import { API_BASE_URL } from '../../services/api'
 
 interface PageImageProps {
   src: string
@@ -33,13 +34,18 @@ export default function PageImage({
     setRetryCount((prev) => prev + 1)
   }
 
+  // Normalize source URL: if it's a relative /api path, resolve against API host
+  const normalizedSrc = src.startsWith('/api')
+    ? `${API_BASE_URL.replace(/\/api\/?$/, '')}${src}`
+    : src
+
   // Add retry bust query if retrying
   const currentSrc =
     retryCount > 0
-      ? src.includes('?')
-        ? `${src}&retry=${retryCount}`
-        : `${src}?retry=${retryCount}`
-      : src
+      ? normalizedSrc.includes('?')
+        ? `${normalizedSrc}&retry=${retryCount}`
+        : `${normalizedSrc}?retry=${retryCount}`
+      : normalizedSrc
 
   return (
     <div
