@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { useTelegram } from './hooks/useTelegram'
+import { LibraryProvider } from './context/LibraryContext'
 import MainLayout from './layouts/MainLayout'
 import HomePage from './pages/HomePage'
 import SearchPage from './pages/SearchPage'
@@ -15,17 +16,19 @@ function App() {
 
   return (
     <BrowserRouter>
-      <MainLayout>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/search" element={<SearchPage />} />
-          <Route path="/manga/:idOrSlug" element={<MangaDetailPage />} />
-          <Route path="/manga/:idOrSlug/chapter/:chapterId" element={<ReaderPage />} />
-          <Route path="/library" element={<LibraryPage />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Routes>
-      </MainLayout>
+      <LibraryProvider>
+        <MainLayout>
+          <Routes>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/search" element={<SearchPage />} />
+            <Route path="/manga/:idOrSlug" element={<MangaDetailPage />} />
+            <Route path="/manga/:idOrSlug/chapter/:chapterId" element={<ReaderPage />} />
+            <Route path="/library" element={<LibraryPage />} />
+            <Route path="/history" element={<HistoryPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Routes>
+        </MainLayout>
+      </LibraryProvider>
     </BrowserRouter>
   )
 }

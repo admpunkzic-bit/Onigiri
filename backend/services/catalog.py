@@ -623,3 +623,75 @@ class CatalogService:
             await self.sync_manga_chapters(manga_id)
 
         return self._load_manga_chapters(manga_id, order=order)
+
+    async def add_to_library(self, user_id: str, id_or_slug: str) -> Optional[MangaListRead]:
+        """
+        Add manga to user's personal library.
+        If manga is not present locally, provisions it from registered provider.
+        Returns the compact MangaListRead representation.
+        """
+        row = self._find_manga_row(id_or_slug)
+        if not row and self.registry:
+            # Attempt to auto-provision by external UUID/slug
+            detail = await self.get_manga_by_id_or_slug(id_or_slug, auto_sync_chapters=False)
+            if detail:
+                row = self._find_manga_row(str(detail.id))
+
+        if not row:
+            return None
+
+        manga_id = row["id"]
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO user_library (user_id, manga_id)
+            VALUES (?, ?)
+            """,
+            (user_id, manga_id),
+        )
+        self.conn.commit()
+
+        items = self._load_manga_list_items([manga_id])
+        return items[0] if items else None
+
+    def remove_from_library(self, user_id: str, id_or_slug: str) -> bool:
+        """
+        Remove manga from user's personal library.
+        Returns True if item was removed, False if not found.
+        """
+        row = self._find_manga_row(id_or_slug)
+        if not row:
+            return False
+
+        manga_id = row["id"]
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_library WHERE user_id = ? AND manga_id = ?",
+            (user_id, manga_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_user_library(self, user_id: str) -> List[MangaListRead]:
+        """
+        Retrieve all manga bookmarked in user's library, sorted by added date descending.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT manga_id FROM user_library WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        manga_ids = [row["manga_id"] for row in cursor.fetchall()]
+        return self._load_manga_list_items(manga_ids)
+
+    def get_user_library_manga_ids(self, user_id: str) -> List[int]:
+        """
+        Retrieve lightweight list of manga IDs bookmarked in user's library.
+        Used for fast star state checking in catalog grids and search.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT manga_id FROM user_library WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        return [row["manga_id"] for row in cursor.fetchall()]

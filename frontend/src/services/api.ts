@@ -236,3 +236,74 @@ export function getPageImageUrl(
   const query = dataSaver ? '?data_saver=true' : ''
   return `${API_BASE_URL}/manga/chapters/${chapterId}/pages/${pageNumber}${query}`
 }
+
+// ── Library API methods ─────────────────────────────────────
+
+const GUEST_LIBRARY_STORAGE_KEY = 'onigiri_guest_library'
+
+function getGuestLibrary(): MangaItem[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = localStorage.getItem(GUEST_LIBRARY_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveGuestLibrary(items: MangaItem[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(GUEST_LIBRARY_STORAGE_KEY, JSON.stringify(items))
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export async function fetchLibrary(signal?: AbortSignal): Promise<MangaItem[]> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    return getGuestLibrary()
+  }
+
+  return request<MangaItem[]>('/library', { signal })
+}
+
+export async function fetchLibraryIds(signal?: AbortSignal): Promise<number[]> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    return getGuestLibrary().map((m) => m.id)
+  }
+
+  return request<number[]>('/library/ids', { signal })
+}
+
+export async function addToLibrary(manga: MangaItem): Promise<void> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    const current = getGuestLibrary()
+    if (!current.some((item) => item.id === manga.id)) {
+      saveGuestLibrary([manga, ...current])
+    }
+    return
+  }
+
+  await request<void>(`/library/${encodeURIComponent(String(manga.id))}`, {
+    method: 'POST',
+  })
+}
+
+export async function removeFromLibrary(mangaId: number): Promise<void> {
+  const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
+  if (!tgInitData || tgInitData.trim().length === 0) {
+    const current = getGuestLibrary()
+    saveGuestLibrary(current.filter((item) => item.id !== mangaId))
+    return
+  }
+
+  await request<void>(`/library/${encodeURIComponent(String(mangaId))}`, {
+    method: 'DELETE',
+  })
+}

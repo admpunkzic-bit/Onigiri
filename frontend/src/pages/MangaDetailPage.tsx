@@ -22,6 +22,7 @@ import {
   syncMangaChapters,
 } from '../services/api'
 import type { ChapterItem, MangaDetail, ReadingProgress } from '../types/manga'
+import { useLibrary } from '../context/LibraryContext'
 
 function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
@@ -55,6 +56,7 @@ function formatChapterNumber(num: number | null | undefined): string | null {
 export default function MangaDetailPage() {
   const { idOrSlug } = useParams<{ idOrSlug: string }>()
   const navigate = useNavigate()
+  const { isStarred, toggleStar } = useLibrary()
 
   const [manga, setManga] = useState<MangaDetail | null>(null)
   const [chapters, setChapters] = useState<ChapterItem[]>([])
@@ -213,6 +215,8 @@ export default function MangaDetailPage() {
   const statusInfo = statusLabels[manga.status?.toLowerCase()]
   const hasLongDesc = manga.description && manga.description.length > 250
 
+  const starred = manga ? isStarred(manga.id) : false
+
   return (
     <div className="px-4 pt-6 pb-28 max-w-3xl mx-auto">
       {/* Navigation header */}
@@ -223,6 +227,24 @@ export default function MangaDetailPage() {
         >
           <ArrowLeft size={16} />
           Назад
+        </button>
+
+        <button
+          type="button"
+          onClick={() => manga && toggleStar(manga)}
+          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all active:scale-95 cursor-pointer ${
+            starred
+              ? 'bg-amber-400/10 text-amber-400 border border-amber-400/30'
+              : 'bg-surface text-text-secondary hover:text-text-primary border border-white/10'
+          }`}
+          title={starred ? 'Удалить из библиотеки' : 'Добавить в библиотеку'}
+          aria-label={starred ? 'Удалить из библиотеки' : 'Добавить в библиотеку'}
+        >
+          <Star
+            size={14}
+            className={starred ? 'fill-amber-400 text-amber-400' : 'text-text-secondary'}
+          />
+          <span>{starred ? 'В библиотеке' : 'В библиотеку'}</span>
         </button>
       </div>
 

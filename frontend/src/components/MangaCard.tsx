@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { BookMarked } from 'lucide-react'
+import { BookMarked, Star } from 'lucide-react'
 import type { MangaItem } from '../types/manga'
+import { useLibrary } from '../context/LibraryContext'
 
 interface MangaCardProps {
   manga: MangaItem
@@ -20,6 +21,8 @@ function resolveCoverUrl(url?: string | null): string | null {
 
 export default function MangaCard({ manga }: MangaCardProps) {
   const [imageError, setImageError] = useState(false)
+  const { isStarred, toggleStar } = useLibrary()
+  const starred = isStarred(manga.id)
 
   // Status mapping in Russian
   const statusLabels: Record<string, string> = {
@@ -40,6 +43,23 @@ export default function MangaCard({ manga }: MangaCardProps) {
     >
       {/* Cover image container */}
       <div className="relative aspect-[3/4] w-full bg-white/5 overflow-hidden">
+        {/* Star button */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            toggleStar(manga)
+          }}
+          className="absolute top-1.5 left-1.5 z-10 p-1.5 rounded-full bg-black/60 backdrop-blur-xs text-white/80 hover:text-white transition-all active:scale-90 cursor-pointer"
+          title={starred ? 'Удалить из библиотеки' : 'Добавить в библиотеку'}
+          aria-label={starred ? 'Удалить из библиотеки' : 'Добавить в библиотеку'}
+        >
+          <Star
+            size={14}
+            className={starred ? 'fill-amber-400 text-amber-400' : 'text-white/80 hover:text-white'}
+          />
+        </button>
         {coverSrc && !imageError ? (
           <img
             src={coverSrc}

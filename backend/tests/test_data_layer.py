@@ -131,7 +131,7 @@ def test_migration_idempotency(migrated_db: sqlite3.Connection):
 
     cursor = migrated_db.cursor()
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 6
+    assert cursor.fetchone()[0] == len(MIGRATIONS)
 
 
 # ==============================================================================
@@ -522,7 +522,7 @@ def test_migration_transaction_rollback_on_failure(tmp_path: Path):
         assert cursor.fetchone() is None
 
     finally:
-        migrations.MIGRATIONS = original_migrations
+        migrations.MIGRATIONS[:] = original_migrations
         conn.close()
 
 
@@ -571,7 +571,7 @@ def test_migration_recovery_after_simulated_fault(tmp_path: Path):
         run_migrations(conn)
 
     finally:
-        migrations.MIGRATIONS = original_migrations
+        migrations.MIGRATIONS[:] = original_migrations
         conn.close()
 
 
@@ -899,7 +899,7 @@ def test_migration_004_upgrades_task_007_database(tmp_path: Path):
     # 9. Assert idempotency on second run
     run_migrations(conn)
     cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-    assert cursor.fetchone()[0] == 6
+    assert cursor.fetchone()[0] == len(MIGRATIONS)
 
     conn.close()
 
@@ -1171,5 +1171,5 @@ def test_savepoint_rollback_on_migration_fault_preserves_outer_transaction(tmp_p
         assert cursor.fetchone()[0] == "Outer Manga"
 
     finally:
-        migrations.MIGRATIONS = orig
+        migrations.MIGRATIONS[:] = orig
         conn.close()

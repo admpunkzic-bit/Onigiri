@@ -276,6 +276,63 @@ async def save_reading_progress(
 
 
 # ==============================================================================
+# Personal Manga Library Endpoints (TASK 013)
+# ==============================================================================
+
+@router.get("/library", response_model=List[MangaListRead])
+async def get_user_library(
+    user: dict = Depends(require_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get all manga saved in personal library for verified Telegram user.
+    Results are ordered by save date descending.
+    """
+    return catalog_service.get_user_library(str(user["id"]))
+
+
+@router.get("/library/ids", response_model=List[int])
+async def get_user_library_ids(
+    user: dict = Depends(require_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get lightweight list of manga IDs saved in personal library.
+    Used for instant star badge resolution on search and catalog grids.
+    """
+    return catalog_service.get_user_library_manga_ids(str(user["id"]))
+
+
+@router.post("/library/{id_or_slug}")
+async def add_to_user_library(
+    id_or_slug: str,
+    user: dict = Depends(require_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Add a manga to personal library for verified Telegram user.
+    Does not require reading availability or chapters to exist.
+    """
+    item = await catalog_service.add_to_library(str(user["id"]), id_or_slug)
+    if not item:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    return {"status": "added", "manga_id": item.id, "manga": item}
+
+
+@router.delete("/library/{id_or_slug}")
+async def remove_from_user_library(
+    id_or_slug: str,
+    user: dict = Depends(require_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Remove a manga from personal library for verified Telegram user.
+    """
+    removed = catalog_service.remove_from_library(str(user["id"]), id_or_slug)
+    return {"status": "removed" if removed else "not_found", "removed": removed}
+
+
+# ==============================================================================
 # Provider Endpoints (Low-Level / Diagnostic)
 # ==============================================================================
 

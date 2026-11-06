@@ -612,6 +612,31 @@ def _migration_006_user_reading_progress(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_007_user_library(conn: sqlite3.Connection) -> None:
+    """
+    Migration 007: Create user_library table.
+    Stores personal bookmarked/starred manga per verified Telegram user.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_library (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, manga_id)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_library_user_created ON user_library(user_id, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_library_user_manga ON user_library(user_id, manga_id)"
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -620,6 +645,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (4, "004_manga_sources_global_unique", _migration_004_manga_sources_global_unique),
     (5, "005_chapter_source_identity", _migration_005_chapter_source_identity),
     (6, "006_user_reading_progress", _migration_006_user_reading_progress),
+    (7, "007_user_library", _migration_007_user_library),
 ]
 
 
