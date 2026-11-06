@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { useTelegram } from './hooks/useTelegram'
 import { LibraryProvider } from './context/LibraryContext'
+import { SettingsProvider } from './context/SettingsContext'
 import MainLayout from './layouts/MainLayout'
 
 const HomePage = lazy(() => import('./pages/HomePage'))
@@ -26,21 +27,23 @@ function App() {
 
   return (
     <BrowserRouter>
-      <LibraryProvider>
-        <MainLayout>
-          <Suspense fallback={<PageLoading />}>
-            <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/search" element={<SearchPage />} />
-              <Route path="/manga/:idOrSlug" element={<MangaDetailPage />} />
-              <Route path="/manga/:idOrSlug/chapter/:chapterId" element={<ReaderPage />} />
-              <Route path="/library" element={<LibraryPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </Suspense>
-        </MainLayout>
-      </LibraryProvider>
+      <SettingsProvider>
+        <LibraryProvider>
+          <MainLayout>
+            <Suspense fallback={<PageLoading />}>
+              <Routes>
+                <Route path="/" element={<HomePage />} />
+                <Route path="/search" element={<SearchPage />} />
+                <Route path="/manga/:idOrSlug" element={<MangaDetailPage />} />
+                <Route path="/manga/:idOrSlug/chapter/:chapterId" element={<ReaderPage />} />
+                <Route path="/library" element={<LibraryPage />} />
+                <Route path="/history" element={<HistoryPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+              </Routes>
+            </Suspense>
+          </MainLayout>
+        </LibraryProvider>
+      </SettingsProvider>
     </BrowserRouter>
   )
 }

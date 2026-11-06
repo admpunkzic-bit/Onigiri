@@ -146,8 +146,8 @@ export default function HistoryPage() {
     items.length === 1
       ? 'произведение'
       : items.length >= 2 && items.length <= 4
-      ? 'произведения'
-      : 'произведений'
+        ? 'произведения'
+        : 'произведений'
 
   return (
     <div className="px-4 pt-6 pb-24 max-w-4xl mx-auto">

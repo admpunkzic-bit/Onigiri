@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { ChevronRight } from 'lucide-react'
 import type { ChapterReaderPageItem } from '../../types/manga'
 import PageImage from './PageImage'
 
@@ -11,6 +12,8 @@ interface PagedReaderProps {
   onNextChapter?: () => void
   prevChapterId?: number | null
   onPrevChapter?: () => void
+  preloadPages?: boolean
+  autoNextChapter?: boolean
 }
 
 export default function PagedReader({
@@ -22,22 +25,28 @@ export default function PagedReader({
   onNextChapter,
   prevChapterId,
   onPrevChapter,
+  preloadPages = true,
+  autoNextChapter = true,
 }: PagedReaderProps) {
   const touchStartX = useRef<number | null>(null)
   const touchStartY = useRef<number | null>(null)
 
   const activePage = pages.find((p) => p.page_number === currentPage) || pages[0]
 
-  // Preload next page
+  // Preload next 2 pages if preloadPages setting is enabled
   useEffect(() => {
-    if (currentPage < pages.length) {
-      const nextPage = pages.find((p) => p.page_number === currentPage + 1)
-      if (nextPage) {
-        const img = new Image()
-        img.src = nextPage.image_url
+    if (!preloadPages) return
+    for (let offset = 1; offset <= 2; offset++) {
+      const targetPageNum = currentPage + offset
+      if (targetPageNum <= pages.length) {
+        const nextPage = pages.find((p) => p.page_number === targetPageNum)
+        if (nextPage) {
+          const img = new Image()
+          img.src = nextPage.image_url
+        }
       }
     }
-  }, [currentPage, pages])
+  }, [currentPage, pages, preloadPages])
 
   // Keyboard navigation
   useEffect(() => {
@@ -67,7 +76,9 @@ export default function PagedReader({
     if (currentPage < pages.length) {
       onPageChange(currentPage + 1)
     } else if (nextChapterId && onNextChapter) {
-      onNextChapter()
+      if (autoNextChapter) {
+        onNextChapter()
+      }
     }
   }
 
@@ -130,6 +141,23 @@ export default function PagedReader({
       {/* Visual tap hint zones indicator on hover/desktop */}
       <div className="absolute inset-y-0 left-0 w-[30%] cursor-w-resize" title="Предыдущая страница" />
       <div className="absolute inset-y-0 right-0 w-[30%] cursor-e-resize" title="Следующая страница" />
+
+      {/* Manual transition button when autoNextChapter is disabled */}
+      {!autoNextChapter && currentPage === pages.length && nextChapterId && onNextChapter && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-20">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onNextChapter()
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-accent text-white text-xs font-semibold shadow-lg shadow-accent/25 hover:bg-accent/90 transition-all active:scale-95 cursor-pointer"
+          >
+            <span>Следующая глава</span>
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      )}
     </div>
   )
 }

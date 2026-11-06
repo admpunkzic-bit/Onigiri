@@ -10,6 +10,7 @@ interface VerticalReaderProps {
   onToggleControls: () => void
   nextChapterId?: number | null
   onNextChapter?: () => void
+  autoNextChapter?: boolean
 }
 
 export default function VerticalReader({
@@ -19,6 +20,7 @@ export default function VerticalReader({
   onToggleControls,
   nextChapterId,
   onNextChapter,
+  autoNextChapter = true,
 }: VerticalReaderProps) {
   const isInitialScrollDone = useRef(false)
 
@@ -93,13 +95,20 @@ export default function VerticalReader({
             </p>
 
             {nextChapterId ? (
-              <button
-                onClick={onNextChapter}
-                className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
-              >
-                <span>Следующая глава</span>
-                <ChevronRight size={16} />
-              </button>
+              <div className="space-y-2">
+                <button
+                  onClick={onNextChapter}
+                  className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                >
+                  <span>Следующая глава</span>
+                  <ChevronRight size={16} />
+                </button>
+                {autoNextChapter && (
+                  <p className="text-[11px] text-text-secondary/70">
+                    Автопереход включён в настройках
+                  </p>
+                )}
+              </div>
             ) : (
               <p className="text-xs text-accent font-medium">
                 Это последняя доступная глава произведения.

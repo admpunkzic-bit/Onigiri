@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 import {
@@ -7,6 +7,7 @@ import {
   saveReadingProgress,
 } from '../services/api'
 import type { ChapterReaderDetail } from '../types/manga'
+import { useSettings } from '../context/SettingsContext'
 import PagedReader from '../components/reader/PagedReader'
 import ReaderToolbar from '../components/reader/ReaderToolbar'
 import VerticalReader from '../components/reader/VerticalReader'
@@ -15,6 +16,7 @@ export default function ReaderPage() {
   const { idOrSlug, chapterId } = useParams<{ idOrSlug: string; chapterId: string }>()
   const navigate = useNavigate()
   const location = useLocation()
+  const { settings, getEffectiveReadingMode, setLastReadingMode } = useSettings()
 
   const [detail, setDetail] = useState<ChapterReaderDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -23,17 +25,11 @@ export default function ReaderPage() {
   const [controlsVisible, setControlsVisible] = useState(true)
   const [reloadKey, setReloadKey] = useState<number>(0)
 
-  // Mode: 'vertical' (continuous webtoon scroll) or 'paged' (single slide)
-  const [readingMode, setReadingMode] = useState<'vertical' | 'paged'>(() => {
-    try {
-      const saved = localStorage.getItem('onigiri_reader_mode')
-      return saved === 'paged' ? 'paged' : 'vertical'
-    } catch {
-      return 'vertical'
-    }
-  })
+  // Mode: initialized using SettingsContext (respecting rememberLastMode or defaultReadingMode)
+  const [readingMode, setReadingMode] = useState<'vertical' | 'paged'>(() => getEffectiveReadingMode())
 
   const saveTimerRef = useRef<number | null>(null)
+  const hideControlsTimerRef = useRef<number | null>(null)
 
   // ── Telegram BackButton Integration ────────────────────────
   useEffect(() => {
@@ -169,11 +165,44 @@ export default function ReaderPage() {
   const handleToggleMode = () => {
     const nextMode = readingMode === 'vertical' ? 'paged' : 'vertical'
     setReadingMode(nextMode)
-    try {
-      localStorage.setItem('onigiri_reader_mode', nextMode)
-    } catch {
-      // Ignore
+    if (settings.rememberLastMode) {
+      setLastReadingMode(nextMode)
     }
+  }
+
+  // ── Auto-Hide Controls Timer ───────────────────────────────
+  const resetAutoHideTimer = useCallback(() => {
+    if (hideControlsTimerRef.current) {
+      window.clearTimeout(hideControlsTimerRef.current)
+      hideControlsTimerRef.current = null
+    }
+    if (settings.autoHideControls && controlsVisible) {
+      hideControlsTimerRef.current = window.setTimeout(() => {
+        setControlsVisible(false)
+      }, 3500)
+    }
+  }, [settings.autoHideControls, controlsVisible])
+
+  useEffect(() => {
+    if (controlsVisible && settings.autoHideControls) {
+      resetAutoHideTimer()
+    }
+    return () => {
+      if (hideControlsTimerRef.current) {
+        window.clearTimeout(hideControlsTimerRef.current)
+        hideControlsTimerRef.current = null
+      }
+    }
+  }, [controlsVisible, settings.autoHideControls, resetAutoHideTimer])
+
+  const handleToggleControls = () => {
+    setControlsVisible((prev) => {
+      const next = !prev
+      if (next && settings.autoHideControls) {
+        resetAutoHideTimer()
+      }
+      return next
+    })
   }
 
   // ── Chapter Transitions ────────────────────────────────────
@@ -264,20 +293,23 @@ export default function ReaderPage() {
             pages={detail.pages}
             currentPage={currentPage}
             onPageChange={(page) => setCurrentPage(page)}
-            onToggleControls={() => setControlsVisible(!controlsVisible)}
+            onToggleControls={handleToggleControls}
             nextChapterId={detail.next_chapter_id}
             onNextChapter={handleNextChapter}
+            autoNextChapter={settings.autoNextChapter}
           />
         ) : (
           <PagedReader
             pages={detail.pages}
             currentPage={currentPage}
             onPageChange={(page) => setCurrentPage(page)}
-            onToggleControls={() => setControlsVisible(!controlsVisible)}
+            onToggleControls={handleToggleControls}
             nextChapterId={detail.next_chapter_id}
             onNextChapter={handleNextChapter}
             prevChapterId={detail.prev_chapter_id}
             onPrevChapter={handlePrevChapter}
+            preloadPages={settings.preloadPages}
+            autoNextChapter={settings.autoNextChapter}
           />
         )}
       </main>
