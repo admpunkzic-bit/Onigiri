@@ -33,6 +33,10 @@ ALLOWED_DOMAINS = (".mangadex.network", "uploads.mangadex.org")
 _ATHOME_CACHE: Dict[str, Dict[str, Any]] = {}
 ATHOME_CACHE_TTL_SECONDS = 600.0  # 10 minutes TTL
 
+# SingleFlight concurrency deduplication: cache_key -> asyncio.Task
+_ATHOME_IN_FLIGHT: Dict[str, asyncio.Task] = {}
+_ATHOME_LOCK = asyncio.Lock()
+
 
 def validate_and_resolve_url_ssrf(target_url: str) -> None:
     """
@@ -126,7 +130,8 @@ class ReaderService:
         force_refresh: bool = False,
     ) -> ProviderPagesResult:
         """
-        Fetch AtHome pages from registered provider with in-memory 10-minute caching.
+        Fetch AtHome pages from registered provider with in-memory 10-minute caching
+        and SingleFlight concurrency deduplication.
         """
         now = time.time()
         cache_key = f"{source_chapter_id}_{data_saver}"
@@ -139,21 +144,55 @@ class ReaderService:
         if not self.registry:
             raise HTTPException(status_code=500, detail="Provider registry not available")
 
+        # SingleFlight: reuse in-flight task for concurrent requests to same chapter
+        async with _ATHOME_LOCK:
+            # Re-check cache under lock
+            if not force_refresh and cache_key in _ATHOME_CACHE:
+                entry = _ATHOME_CACHE[cache_key]
+                if (time.time() - entry["cached_at"]) < ATHOME_CACHE_TTL_SECONDS:
+                    return entry["result"]
+
+            task = _ATHOME_IN_FLIGHT.get(cache_key)
+            if task is None:
+                task = asyncio.create_task(
+                    self._execute_athome_fetch(source_chapter_id, data_saver, cache_key)
+                )
+                _ATHOME_IN_FLIGHT[cache_key] = task
+
+        # Await shielded task so client disconnects do not cancel the in-flight worker
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+
+    async def _execute_athome_fetch(
+        self,
+        source_chapter_id: str,
+        data_saver: bool,
+        cache_key: str,
+    ) -> ProviderPagesResult:
+        """
+        Execute AtHome provider fetch, update cache, and ensure cleanup from in-flight map.
+        """
         provider = self.registry.get("mangadex")
         try:
             result = await provider.get_chapter_pages(
                 provider_chapter_id=source_chapter_id,
                 data_saver=data_saver,
             )
+            _ATHOME_CACHE[cache_key] = {
+                "result": result,
+                "cached_at": time.time(),
+            }
+            return result
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error("Failed to load AtHome pages for chapter %s: %s", source_chapter_id, exc)
             raise HTTPException(status_code=502, detail=f"Remote provider error: {exc}") from exc
-
-        _ATHOME_CACHE[cache_key] = {
-            "result": result,
-            "cached_at": now,
-        }
-        return result
+        finally:
+            async with _ATHOME_LOCK:
+                _ATHOME_IN_FLIGHT.pop(cache_key, None)
 
     async def get_chapter_reader_detail(
         self,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 import {
   fetchChapterPages,
@@ -14,12 +14,14 @@ import VerticalReader from '../components/reader/VerticalReader'
 export default function ReaderPage() {
   const { idOrSlug, chapterId } = useParams<{ idOrSlug: string; chapterId: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
 
   const [detail, setDetail] = useState<ChapterReaderDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [currentPage, setCurrentPage] = useState<number>(1)
   const [controlsVisible, setControlsVisible] = useState(true)
+  const [reloadKey, setReloadKey] = useState<number>(0)
 
   // Mode: 'vertical' (continuous webtoon scroll) or 'paged' (single slide)
   const [readingMode, setReadingMode] = useState<'vertical' | 'paged'>(() => {
@@ -56,8 +58,9 @@ export default function ReaderPage() {
   }, [idOrSlug, navigate])
 
   // ── Load Chapter Details & Restore Progress ────────────────
-  const loadChapter = async () => {
+  useEffect(() => {
     if (!idOrSlug || !chapterId) return
+
     const chIdNum = parseInt(chapterId, 10)
     if (isNaN(chIdNum)) {
       setError('Некорректный номер главы')
@@ -65,37 +68,72 @@ export default function ReaderPage() {
       return
     }
 
+    let isMounted = true
+    const abortController = new AbortController()
+
     setLoading(true)
     setError(null)
 
-    try {
-      // 1. Fetch chapter reader details (pages, title, prev/next pointers)
-      const data = await fetchChapterPages(idOrSlug, chIdNum)
-      setDetail(data)
-
-      // 2. Attempt to restore last read page for this chapter
-      let initialPage = 1
+    const runLoad = async () => {
       try {
-        const prog = await fetchReadingProgress(idOrSlug)
-        if (prog && prog.chapter_id === chIdNum && prog.page_number >= 1) {
-          initialPage = Math.min(prog.page_number, data.total_pages)
+        const locationState = location.state as { initialPage?: number } | null | undefined
+        const stateInitialPage =
+          typeof locationState?.initialPage === 'number' && locationState.initialPage >= 1
+            ? locationState.initialPage
+            : null
+
+        if (stateInitialPage !== null) {
+          // Fast-path: initial page known from navigation state, fetch chapter pages only
+          const data = await fetchChapterPages(idOrSlug, chIdNum, abortController.signal)
+          if (!isMounted) return
+          const targetPage = Math.min(stateInitialPage, data.total_pages)
+          setDetail(data)
+          setCurrentPage(targetPage)
+        } else {
+          // Parallel fetch: retrieve both chapter reader details and user reading progress
+          const [data, prog] = await Promise.all([
+            fetchChapterPages(idOrSlug, chIdNum, abortController.signal),
+            fetchReadingProgress(idOrSlug, abortController.signal).catch((err) => {
+              if (err instanceof DOMException && err.name === 'AbortError') {
+                throw err
+              }
+              return null
+            }),
+          ])
+
+          if (!isMounted) return
+
+          let targetPage = 1
+          if (prog && prog.chapter_id === chIdNum && prog.page_number >= 1) {
+            targetPage = Math.min(prog.page_number, data.total_pages)
+          }
+
+          setDetail(data)
+          setCurrentPage(targetPage)
         }
-      } catch {
-        // Default to page 1 on progress fetch failure
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          // Request aborted on component unmount or navigation change; ignore
+          return
+        }
+        if (isMounted) {
+          console.error('Failed to load chapter pages:', err)
+          setError('Не удалось загрузить страницы главы. Проверьте подключение к сети.')
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false)
+        }
       }
-
-      setCurrentPage(initialPage)
-    } catch (err: unknown) {
-      console.error('Failed to load chapter pages:', err)
-      setError('Не удалось загрузить страницы главы. Проверьте подключение к сети.')
-    } finally {
-      setLoading(false)
     }
-  }
 
-  useEffect(() => {
-    loadChapter()
-  }, [idOrSlug, chapterId])
+    runLoad()
+
+    return () => {
+      isMounted = false
+      abortController.abort()
+    }
+  }, [idOrSlug, chapterId, location.state, reloadKey])
 
   // ── Debounced Progress Auto-Save ───────────────────────────
   useEffect(() => {
@@ -185,7 +223,7 @@ export default function ReaderPage() {
             Назад к манге
           </button>
           <button
-            onClick={loadChapter}
+            onClick={() => setReloadKey((k) => k + 1)}
             className="px-4 py-2 text-xs font-medium bg-accent hover:bg-accent/90 text-white rounded-xl transition-colors cursor-pointer"
           >
             Повторить

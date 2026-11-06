@@ -71,7 +71,10 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
       ...options,
       headers,
     })
-  } catch {
+  } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err
+    }
     throw new NetworkError()
   }
 
@@ -128,10 +131,12 @@ export function syncMangaChapters(
 
 export async function fetchChapterPages(
   idOrSlug: string,
-  chapterId: number
+  chapterId: number,
+  signal?: AbortSignal
 ): Promise<ChapterReaderDetail> {
   const data = await request<ChapterReaderDetail>(
-    `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters/${chapterId}/pages`
+    `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters/${chapterId}/pages`,
+    { signal }
   )
   const baseUrl = (API_BASE_URL || 'http://localhost:8000/api').replace(/\/api\/?$/, '')
   return {
@@ -146,7 +151,8 @@ export async function fetchChapterPages(
 }
 
 export async function fetchReadingProgress(
-  idOrSlug: string
+  idOrSlug: string,
+  signal?: AbortSignal
 ): Promise<ReadingProgress | null> {
   // If not in Telegram (Guest mode in browser), fetch from localStorage
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
@@ -162,9 +168,13 @@ export async function fetchReadingProgress(
 
   try {
     return await request<ReadingProgress | null>(
-      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`
+      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`,
+      { signal }
     )
-  } catch {
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err
+    }
     return null
   }
 }

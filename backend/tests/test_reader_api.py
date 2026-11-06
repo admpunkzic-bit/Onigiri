@@ -391,3 +391,140 @@ def test_schemas_support_unnumbered_chapter():
     )
     assert detail.chapter_number is None
     assert detail.title == "Special One-shot"
+
+
+# ==============================================================================
+# 6. SingleFlight Concurrency Tests
+# ==============================================================================
+
+@pytest.mark.anyio
+async def test_singleflight_concurrent_athome_requests_share_task(test_db_with_chapters):
+    import asyncio
+    from services.reader import _ATHOME_CACHE, _ATHOME_IN_FLIGHT
+
+    # Clean cache and in-flight tasks for test isolation
+    _ATHOME_CACHE.clear()
+    _ATHOME_IN_FLIGHT.clear()
+
+    mock_provider = AsyncMock()
+    mock_provider.provider_id = "mangadex"
+
+    async def delayed_fetch(provider_chapter_id: str, data_saver: bool):
+        await asyncio.sleep(0.05)
+        return ProviderPagesResult(
+            provider_id="mangadex",
+            provider_chapter_id=provider_chapter_id,
+            pages=[
+                ProviderPageItem(page_number=1, image_url="https://cmdxd.mangadex.network/p1.png"),
+                ProviderPageItem(page_number=2, image_url="https://cmdxd.mangadex.network/p2.png"),
+            ],
+            data_saver=data_saver,
+        )
+
+    mock_provider.get_chapter_pages.side_effect = delayed_fetch
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+    reader_service = ReaderService(conn=test_db_with_chapters, registry=registry)
+
+    # Launch two simultaneous requests for the same chapter
+    res1, res2 = await asyncio.gather(
+        reader_service.get_athome_pages("shared-ch-1", False, force_refresh=True),
+        reader_service.get_athome_pages("shared-ch-1", False, force_refresh=True),
+    )
+
+    # Both requests must receive identical valid page results
+    assert len(res1.pages) == 2
+    assert len(res2.pages) == 2
+    assert res1.pages[0].image_url == "https://cmdxd.mangadex.network/p1.png"
+
+    # SingleFlight must ensure provider was called exactly ONCE
+    assert mock_provider.get_chapter_pages.call_count == 1
+    # In-flight task must be cleaned up
+    assert "shared-ch-1_False" not in _ATHOME_IN_FLIGHT
+
+
+@pytest.mark.anyio
+async def test_singleflight_different_chapters_independent(test_db_with_chapters):
+    import asyncio
+    from services.reader import _ATHOME_CACHE, _ATHOME_IN_FLIGHT
+
+    _ATHOME_CACHE.clear()
+    _ATHOME_IN_FLIGHT.clear()
+
+    mock_provider = AsyncMock()
+    mock_provider.provider_id = "mangadex"
+
+    async def fake_fetch(provider_chapter_id: str, data_saver: bool):
+        await asyncio.sleep(0.02)
+        return ProviderPagesResult(
+            provider_id="mangadex",
+            provider_chapter_id=provider_chapter_id,
+            pages=[
+                ProviderPageItem(
+                    page_number=1,
+                    image_url=f"https://cmdxd.mangadex.network/{provider_chapter_id}/p1.png",
+                )
+            ],
+            data_saver=data_saver,
+        )
+
+    mock_provider.get_chapter_pages.side_effect = fake_fetch
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+    reader_service = ReaderService(conn=test_db_with_chapters, registry=registry)
+
+    # Launch concurrent requests for distinct chapters
+    res_a, res_b = await asyncio.gather(
+        reader_service.get_athome_pages("chapter-A", False, force_refresh=True),
+        reader_service.get_athome_pages("chapter-B", False, force_refresh=True),
+    )
+
+    assert res_a.provider_chapter_id == "chapter-A"
+    assert res_b.provider_chapter_id == "chapter-B"
+    # Both distinct chapters must be fetched independently
+    assert mock_provider.get_chapter_pages.call_count == 2
+    assert len(_ATHOME_IN_FLIGHT) == 0
+
+
+@pytest.mark.anyio
+async def test_singleflight_error_cleanup_and_retry(test_db_with_chapters):
+    import asyncio
+    from services.reader import _ATHOME_CACHE, _ATHOME_IN_FLIGHT
+
+    _ATHOME_CACHE.clear()
+    _ATHOME_IN_FLIGHT.clear()
+
+    mock_provider = AsyncMock()
+    mock_provider.provider_id = "mangadex"
+    mock_provider.get_chapter_pages.side_effect = Exception("MangaDex timeout")
+
+    registry = ProviderRegistry()
+    registry.register(mock_provider)
+    reader_service = ReaderService(conn=test_db_with_chapters, registry=registry)
+
+    # First call fails due to provider error
+    with pytest.raises(HTTPException) as exc_info:
+        await reader_service.get_athome_pages("error-ch-1", False, force_refresh=True)
+    assert exc_info.value.status_code == 502
+
+    # In-flight task must be immediately evicted from dictionary
+    assert "error-ch-1_False" not in _ATHOME_IN_FLIGHT
+
+    # Configure provider to succeed on retry
+    mock_provider.get_chapter_pages.side_effect = None
+    mock_provider.get_chapter_pages.return_value = ProviderPagesResult(
+        provider_id="mangadex",
+        provider_chapter_id="error-ch-1",
+        pages=[
+            ProviderPageItem(page_number=1, image_url="https://cmdxd.mangadex.network/retry.png")
+        ],
+        data_saver=False,
+    )
+
+    # Subsequent retry succeeds cleanly
+    retry_res = await reader_service.get_athome_pages("error-ch-1", False, force_refresh=True)
+    assert len(retry_res.pages) == 1
+    assert retry_res.pages[0].image_url == "https://cmdxd.mangadex.network/retry.png"
+    assert "error-ch-1_False" not in _ATHOME_IN_FLIGHT

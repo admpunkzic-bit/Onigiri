@@ -338,7 +338,8 @@ export default function MangaDetailPage() {
                     <button
                       onClick={() =>
                         navigate(
-                          `/manga/${manga.slug || manga.id}/chapter/${progress.chapter_id}`
+                          `/manga/${manga.slug || manga.id}/chapter/${progress.chapter_id}`,
+                          { state: { initialPage: progress.page_number } }
                         )
                       }
                       className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl shadow-lg shadow-accent/20 transition-all active:scale-[0.98] cursor-pointer"
@@ -371,7 +372,8 @@ export default function MangaDetailPage() {
                     onClick={() => {
                       if (firstChapter) {
                         navigate(
-                          `/manga/${manga.slug || manga.id}/chapter/${firstChapter.id}`
+                          `/manga/${manga.slug || manga.id}/chapter/${firstChapter.id}`,
+                          { state: { initialPage: 1 } }
                         )
                       }
                     }}
@@ -490,7 +492,8 @@ export default function MangaDetailPage() {
                   key={ch.id}
                   onClick={() =>
                     navigate(
-                      `/manga/${manga.slug || manga.id}/chapter/${ch.id}`
+                      `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
+                      { state: { initialPage: 1 } }
                     )
                   }
                   role="button"
@@ -499,7 +502,8 @@ export default function MangaDetailPage() {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault()
                       navigate(
-                        `/manga/${manga.slug || manga.id}/chapter/${ch.id}`
+                        `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
+                        { state: { initialPage: 1 } }
                       )
                     }
                   }}
