@@ -12,7 +12,7 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database.migrations import is_fts5_available, search_manga, slugify
 from providers.base import (
@@ -299,35 +299,67 @@ class CatalogService:
 
         return results
 
+    def get_all_genres(self) -> List[GenreRead]:
+        """Load all distinct genres that are associated with at least one manga, sorted alphabetically."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT g.id, g.name, g.slug, COUNT(mg.manga_id) as manga_count
+            FROM genres g
+            JOIN manga_genres mg ON mg.genre_id = g.id
+            GROUP BY g.id
+            HAVING manga_count > 0
+            ORDER BY g.name ASC
+            """
+        )
+        return [
+            GenreRead(id=r["id"], name=r["name"], slug=r["slug"])
+            for r in cursor.fetchall()
+        ]
+
     async def search(
         self,
-        query: str,
+        query: Optional[str] = None,
+        genres: Optional[List[str]] = None,
+        excluded_genres: Optional[List[str]] = None,
+        manga_type: Optional[str] = None,
+        status: Optional[str] = None,
+        author: Optional[str] = None,
+        release_year: Optional[int] = None,
+        sort_by: str = "popularity",
+        sort_order: str = "desc",
         page: int = 1,
         limit: int = 20,
     ) -> List[MangaListRead]:
         """
-        Unified search endpoint with Manga-Chan prioritized as PRIMARY, MangaDex as RESERVE.
-        Runs external provider searches concurrently via asyncio.gather with a timeout.
-        Prioritizes Manga-Chan items first in the result set.
-        Caches search responses in-memory (TTL 5 minutes) for instant repeat access (< 5 ms).
-        Safely falls back to local catalog if providers are unavailable.
+        Unified search and multi-criteria catalog filtering endpoint.
+        - Prioritizes Manga-Chan as PRIMARY and MangaDex as RESERVE for external search.
+        - Supports text queries (FTS5 + LIKE fallback), genre inclusion/exclusion, format types,
+          publication status, author/artist, release year, custom sorting, and pagination.
+        - Utilizes composite database indexes for sub-millisecond sorting and query plan efficiency.
+        - Employs in-memory TTL caching (5 minutes).
         """
-        clean_query = query.strip()
-        cache_key = f"{clean_query.lower()}_{page}_{limit}"
+        clean_query = (query or "").strip()
+        clean_genres = sorted([g.strip() for g in (genres or []) if g.strip()])
+        clean_ex_genres = sorted([g.strip() for g in (excluded_genres or []) if g.strip()])
+        cache_key = (
+            f"{clean_query.lower()}_{clean_genres}_{clean_ex_genres}_"
+            f"{manga_type}_{status}_{author}_{release_year}_{sort_by}_{sort_order}_{page}_{limit}"
+        )
 
         now = time.time()
-        if clean_query and cache_key in _SEARCH_CACHE:
+        if cache_key in _SEARCH_CACHE:
             cached_at, cached_items = _SEARCH_CACHE[cache_key]
             if (now - cached_at) < SEARCH_CACHE_TTL_SECONDS:
                 return cached_items
 
         provider_manga_ids: List[int] = []
 
+        # 1. If text query is present, query external providers concurrently
         if self.registry and clean_query:
             tasks = []
             task_providers = []
 
-            # 1. Primary provider: Manga-Chan
             if self.registry.has("mangachan"):
                 chan_prov = self.registry.get("mangachan")
                 tasks.append(
@@ -338,7 +370,6 @@ class CatalogService:
                 )
                 task_providers.append("mangachan")
 
-            # 2. Reserve provider: MangaDex
             if self.registry.has("mangadex"):
                 dex_prov = self.registry.get("mangadex")
                 tasks.append(
@@ -365,36 +396,121 @@ class CatalogService:
                         elif prov_name == "mangadex":
                             dex_items = res.items
 
-                # Manga-Chan (Primary) items upserted and positioned first
+                # Primary (Manga-Chan) upserted first
                 for item in chan_items:
                     m_id = self.upsert_provider_manga(item)
                     if m_id not in provider_manga_ids:
                         provider_manga_ids.append(m_id)
 
-                # MangaDex (Reserve) items appended next
+                # Reserve (MangaDex) items appended next
                 for item in dex_items:
                     m_id = self.upsert_provider_manga(item)
                     if m_id not in provider_manga_ids:
                         provider_manga_ids.append(m_id)
 
-        # 3. Query local SQLite database (FTS5 search with LIKE fallback)
-        offset = (page - 1) * limit
-        local_rows = search_manga(self.conn, clean_query, limit=limit, offset=offset)
-        local_manga_ids = [row["id"] for row in local_rows]
+        # 2. Build dynamic SQLite query with all active filters
+        cursor = self.conn.cursor()
+        where_clauses: List[str] = []
+        params: List[Any] = []
 
-        # 4. Combine provider-found IDs and local IDs while preserving order and uniqueness
+        if clean_query:
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='manga_search_index'")
+            has_fts5 = cursor.fetchone() is not None
+            if has_fts5:
+                fts_terms = [re.sub(r'["*]', '', term) for term in clean_query.split() if term]
+                if fts_terms:
+                    fts_expr = " ".join(f'"{term}"*' for term in fts_terms)
+                    where_clauses.append("m.id IN (SELECT manga_id FROM manga_search_index WHERE manga_search_index MATCH ?)")
+                    params.append(fts_expr)
+                else:
+                    where_clauses.append("(m.title LIKE ? OR m.original_title LIKE ?)")
+                    params.extend([f"%{clean_query}%", f"%{clean_query}%"])
+            else:
+                where_clauses.append("(m.title LIKE ? OR m.original_title LIKE ? OR m.description LIKE ?)")
+                params.extend([f"%{clean_query}%", f"%{clean_query}%", f"%{clean_query}%"])
+
+        if clean_genres:
+            for g_term in clean_genres:
+                where_clauses.append(
+                    """
+                    m.id IN (
+                        SELECT mg.manga_id FROM manga_genres mg
+                        JOIN genres g ON g.id = mg.genre_id
+                        WHERE g.slug = ? OR LOWER(g.name) = LOWER(?)
+                    )
+                    """
+                )
+                params.extend([g_term, g_term])
+
+        if clean_ex_genres:
+            ph = ",".join("?" for _ in clean_ex_genres)
+            where_clauses.append(
+                f"""
+                m.id NOT IN (
+                    SELECT mg_ex.manga_id FROM manga_genres mg_ex
+                    JOIN genres g_ex ON g_ex.id = mg_ex.genre_id
+                    WHERE g_ex.slug IN ({ph}) OR LOWER(g_ex.name) IN ({ph})
+                )
+                """
+            )
+            params.extend(clean_ex_genres)
+            params.extend([g.lower() for g in clean_ex_genres])
+
+        if manga_type:
+            where_clauses.append("LOWER(m.type) = LOWER(?)")
+            params.append(manga_type.strip())
+
+        if status:
+            where_clauses.append("LOWER(m.status) = LOWER(?)")
+            params.append(status.strip())
+
+        if author:
+            where_clauses.append(
+                """
+                m.id IN (
+                    SELECT ma.manga_id FROM manga_authors ma
+                    JOIN authors a ON a.id = ma.author_id
+                    WHERE LOWER(a.name) LIKE ?
+                )
+                """
+            )
+            params.append(f"%{author.strip().lower()}%")
+
+        if release_year:
+            where_clauses.append("m.release_year = ?")
+            params.append(release_year)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        order_dir = "DESC" if sort_order.lower() == "desc" else "ASC"
+        sort_key = sort_by.lower()
+        if sort_key == "rating":
+            order_sql = f"ORDER BY m.rating {order_dir}, m.views_count {order_dir}"
+        elif sort_key in ("views", "popularity"):
+            order_sql = f"ORDER BY m.rating {order_dir}, m.views_count {order_dir}, m.id {order_dir}"
+        elif sort_key == "updated_at":
+            order_sql = f"ORDER BY m.updated_at {order_dir}"
+        elif sort_key == "created_at":
+            order_sql = f"ORDER BY m.created_at {order_dir}"
+        else:
+            order_sql = f"ORDER BY m.rating {order_dir}, m.views_count {order_dir}, m.id {order_dir}"
+
+        offset = (page - 1) * limit
+        sql = f"SELECT m.id FROM manga m {where_sql} {order_sql} LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        cursor.execute(sql, params)
+        local_manga_ids = [row["id"] for row in cursor.fetchall()]
+
         combined_ids: List[int] = []
         for mid in provider_manga_ids + local_manga_ids:
             if mid not in combined_ids:
                 combined_ids.append(mid)
 
-        # Truncate to limit
         final_ids = combined_ids[:limit]
         loaded_items = self._load_manga_list_items(final_ids)
 
-        if clean_query:
-            _SEARCH_CACHE[cache_key] = (now, loaded_items)
-
+        _SEARCH_CACHE[cache_key] = (now, loaded_items)
         return loaded_items
 
     def _find_manga_row(self, identifier: str) -> Optional[sqlite3.Row]:

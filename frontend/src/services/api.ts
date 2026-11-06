@@ -26,7 +26,15 @@ export interface HealthResponse {
 }
 
 export interface SearchMangaParams {
-  q: string
+  q?: string
+  genre?: string[]
+  excluded_genre?: string[]
+  type?: string
+  status?: string
+  author?: string
+  release_year?: number
+  sort_by?: string
+  sort_order?: string
   page?: number
   limit?: number
 }
@@ -91,19 +99,55 @@ export function fetchHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/health')
 }
 
-export async function fetchMangaSearch(params: SearchMangaParams): Promise<MangaItem[]> {
-  const cleanQuery = params.q.trim()
-  if (!cleanQuery) {
-    return []
+export function fetchGenres(): Promise<Array<{ id: number; name: string; slug: string }>> {
+  return request<Array<{ id: number; name: string; slug: string }>>('/manga/genres')
+}
+
+export async function fetchMangaSearch(
+  params: SearchMangaParams,
+  signal?: AbortSignal
+): Promise<MangaItem[]> {
+  const queryParams = new URLSearchParams()
+
+  if (params.q?.trim()) {
+    queryParams.set('q', params.q.trim())
+  }
+  if (params.genre && params.genre.length > 0) {
+    for (const g of params.genre) {
+      if (g.trim()) queryParams.append('genre', g.trim())
+    }
+  }
+  if (params.excluded_genre && params.excluded_genre.length > 0) {
+    for (const eg of params.excluded_genre) {
+      if (eg.trim()) queryParams.append('excluded_genre', eg.trim())
+    }
+  }
+  if (params.type?.trim()) {
+    queryParams.set('type', params.type.trim())
+  }
+  if (params.status?.trim()) {
+    queryParams.set('status', params.status.trim())
+  }
+  if (params.author?.trim()) {
+    queryParams.set('author', params.author.trim())
+  }
+  if (params.release_year) {
+    queryParams.set('release_year', String(params.release_year))
+  }
+  if (params.sort_by?.trim()) {
+    queryParams.set('sort_by', params.sort_by.trim())
+  }
+  if (params.sort_order?.trim()) {
+    queryParams.set('sort_order', params.sort_order.trim())
+  }
+  if (params.page) {
+    queryParams.set('page', String(params.page))
+  }
+  if (params.limit) {
+    queryParams.set('limit', String(params.limit))
   }
 
-  const queryParams = new URLSearchParams({
-    q: cleanQuery,
-    page: String(params.page ?? 1),
-    limit: String(params.limit ?? 20),
-  })
-
-  return request<MangaItem[]>(`/manga/search?${queryParams.toString()}`)
+  return request<MangaItem[]>(`/manga/search?${queryParams.toString()}`, { signal })
 }
 
 export function fetchMangaDetail(idOrSlug: string): Promise<MangaDetail> {

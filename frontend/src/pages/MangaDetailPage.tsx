@@ -26,7 +26,7 @@ import { useLibrary } from '../context/LibraryContext'
 
 function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
-  if (url.startsWith('https://uploads.mangadex.org/')) {
+  if (url.startsWith('https://uploads.mangadex.org/') || url.includes('manga-chan.me')) {
     const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
     return `${apiBase}/manga/cover/proxy?url=${encodeURIComponent(url)}`
   }
@@ -310,26 +310,39 @@ export default function MangaDetailPage() {
               </span>
             </div>
 
-            {/* Authors & Artists */}
+            {/* Authors & Artists (Clickable) */}
             {manga.authors && manga.authors.length > 0 && (
               <div className="flex items-center gap-2 text-xs text-text-secondary mb-3">
                 <Users size={14} className="shrink-0 text-accent" />
-                <span className="line-clamp-1">
-                  {manga.authors.map((a) => a.name).join(', ')}
-                </span>
+                <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 line-clamp-2">
+                  {manga.authors.map((a, idx) => (
+                    <button
+                      key={a.id || idx}
+                      type="button"
+                      onClick={() => navigate(`/search?author=${encodeURIComponent(a.name)}`)}
+                      className="hover:text-primary-400 hover:underline transition-colors text-left font-medium cursor-pointer"
+                      title={`Найти произведения автора ${a.name}`}
+                    >
+                      {a.name}{idx < manga.authors.length - 1 ? ',' : ''}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
-            {/* Genres */}
+            {/* Genres (Clickable chips) */}
             {manga.genres && manga.genres.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mb-4">
                 {manga.genres.map((g) => (
-                  <span
+                  <button
                     key={g.id}
-                    className="text-[11px] px-2.5 py-1 rounded-lg bg-surface border border-white/5 text-text-secondary"
+                    type="button"
+                    onClick={() => navigate(`/search?genre=${encodeURIComponent(g.slug || g.name)}`)}
+                    className="text-[11px] px-2.5 py-1 rounded-lg bg-surface border border-white/5 text-text-secondary hover:text-primary-400 hover:border-primary-500/30 hover:bg-primary-500/10 transition-all cursor-pointer active:scale-95"
+                    title={`Фильтровать по жанру ${g.name}`}
                   >
                     {g.name}
-                  </span>
+                  </button>
                 ))}
               </div>
             )}

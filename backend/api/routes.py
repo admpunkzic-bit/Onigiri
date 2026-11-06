@@ -30,6 +30,7 @@ from api.auth import require_telegram_user
 from schemas.manga import (
     ChapterRead,
     ChapterReaderDetailRead,
+    GenreRead,
     MangaDetailRead,
     MangaListRead,
     ReadingProgressRead,
@@ -105,19 +106,49 @@ async def health_check():
 # Unified Catalog Endpoints (Onigiri User-Facing API)
 # ==============================================================================
 
+@router.get("/manga/genres", response_model=List[GenreRead])
+async def get_all_genres(
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get all active manga genres in the Onigiri catalog for filter selection.
+    """
+    return catalog_service.get_all_genres()
+
+
 @router.get("/manga/search", response_model=List[MangaListRead])
 async def search_manga(
-    q: str = Query(..., min_length=1, description="Search query string"),
+    q: Optional[str] = Query(None, description="Search query string"),
+    genre: Optional[List[str]] = Query(None, description="Included genre slugs or names"),
+    excluded_genre: Optional[List[str]] = Query(None, description="Excluded genre slugs or names"),
+    type: Optional[str] = Query(None, description="Manga format type: manga, manhwa, manhua"),
+    status: Optional[str] = Query(None, description="Publication status: ongoing, completed, hiatus, cancelled"),
+    author: Optional[str] = Query(None, description="Author or artist name"),
+    release_year: Optional[int] = Query(None, description="Release year"),
+    sort_by: str = Query("popularity", description="Sort by: popularity, rating, updated_at, created_at, relevance"),
+    sort_order: str = Query("desc", description="Sort order: asc, desc"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
-    Search manga across the unified Onigiri catalog.
-    Queries external Russian-translated sources (MangaDex) and local catalog.
-    Returns unified Onigiri manga cards without exposing provider names.
+    Search and filter manga across the unified Onigiri catalog.
+    Supports full-text query, genre inclusion/exclusion, format types, status,
+    author/artist, release year, custom sorting, and pagination without exposing provider names.
     """
-    return await catalog_service.search(query=q, page=page, limit=limit)
+    return await catalog_service.search(
+        query=q,
+        genres=genre,
+        excluded_genres=excluded_genre,
+        manga_type=type,
+        status=status,
+        author=author,
+        release_year=release_year,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        limit=limit,
+    )
 
 
 # In-memory LRU cache for cover images: URL -> (content_bytes, content_type)
