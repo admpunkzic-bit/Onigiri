@@ -637,6 +637,67 @@ def _migration_007_user_library(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_008_canonical_chapters(conn: sqlite3.Connection) -> None:
+    """
+    Migration 008: Create canonical_chapters table and link provider chapters.
+    Preserves all existing chapter IDs, reading progress, and supports multi-scanlation
+    variants per chapter.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS canonical_chapters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            chapter_number REAL NOT NULL,
+            volume_number INTEGER,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(manga_id, chapter_number)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canonical_chapters_manga_num ON canonical_chapters(manga_id, chapter_number)"
+    )
+
+    # Check if chapters has canonical_chapter_id column
+    cursor.execute("PRAGMA table_info(chapters)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "canonical_chapter_id" not in columns:
+        cursor.execute(
+            "ALTER TABLE chapters ADD COLUMN canonical_chapter_id INTEGER REFERENCES canonical_chapters(id) ON DELETE SET NULL"
+        )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chapters_canonical_id ON chapters(canonical_chapter_id)"
+    )
+
+    # Backfill canonical chapters from existing chapters
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO canonical_chapters (manga_id, chapter_number, volume_number, title)
+        SELECT manga_id, chapter_number, volume_number, title
+        FROM chapters
+        ORDER BY id ASC
+        """
+    )
+
+    # Link chapters to their canonical chapter
+    cursor.execute(
+        """
+        UPDATE chapters
+        SET canonical_chapter_id = (
+            SELECT cc.id
+            FROM canonical_chapters cc
+            WHERE cc.manga_id = chapters.manga_id
+              AND cc.chapter_number = chapters.chapter_number
+        )
+        WHERE canonical_chapter_id IS NULL
+        """
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -646,6 +707,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (5, "005_chapter_source_identity", _migration_005_chapter_source_identity),
     (6, "006_user_reading_progress", _migration_006_user_reading_progress),
     (7, "007_user_library", _migration_007_user_library),
+    (8, "008_canonical_chapters", _migration_008_canonical_chapters),
 ]
 
 

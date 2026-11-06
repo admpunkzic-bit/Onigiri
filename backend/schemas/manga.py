@@ -75,6 +75,7 @@ class ChapterBase(BaseModel):
     volume_number: Optional[int] = Field(None, ge=0)
     title: Optional[str] = None
     source_chapter_id: Optional[str] = None
+    canonical_chapter_id: Optional[int] = None
     language: Optional[str] = "ru"
     scanlation_group: Optional[str] = None
     published_at: Optional[datetime] = None

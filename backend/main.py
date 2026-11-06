@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).parent / ".env")
 from api.routes import router as api_router
 from database.connection import init_db
 from providers.mangadex import MangaDexHttpClient, MangaDexProvider
+from providers.mangachan import MangaChanHttpClient, MangaChanProvider
 from providers.registry import ProviderRegistry
 
 
@@ -29,6 +30,10 @@ async def lifespan(app: FastAPI):
     mangadex_client = MangaDexHttpClient()
     mangadex_provider = MangaDexProvider(client=mangadex_client)
     registry.register(mangadex_provider)
+
+    mangachan_client = MangaChanHttpClient()
+    mangachan_provider = MangaChanProvider(client=mangachan_client)
+    registry.register(mangachan_provider)
 
     app.state.provider_registry = registry
 

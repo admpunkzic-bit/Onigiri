@@ -26,8 +26,13 @@ from schemas.manga import (
 
 logger = logging.getLogger(__name__)
 
-# Allowed MangaDex domain suffixes for SSRF protection
-ALLOWED_DOMAINS = (".mangadex.network", "uploads.mangadex.org")
+# Allowed domain suffixes for SSRF protection
+ALLOWED_DOMAINS = (
+    ".mangadex.network",
+    "uploads.mangadex.org",
+    ".manga-chan.me",
+    "manga-chan.me",
+)
 
 # In-memory AtHome cache: source_chapter_id -> { "result": ProviderPagesResult, "cached_at": float }
 _ATHOME_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -128,13 +133,14 @@ class ReaderService:
         source_chapter_id: str,
         data_saver: bool = False,
         force_refresh: bool = False,
+        provider_id: str = "mangadex",
     ) -> ProviderPagesResult:
         """
         Fetch AtHome pages from registered provider with in-memory 10-minute caching
         and SingleFlight concurrency deduplication.
         """
         now = time.time()
-        cache_key = f"{source_chapter_id}_{data_saver}"
+        cache_key = f"{provider_id}_{source_chapter_id}_{data_saver}"
 
         if not force_refresh and cache_key in _ATHOME_CACHE:
             entry = _ATHOME_CACHE[cache_key]
@@ -155,7 +161,7 @@ class ReaderService:
             task = _ATHOME_IN_FLIGHT.get(cache_key)
             if task is None:
                 task = asyncio.create_task(
-                    self._execute_athome_fetch(source_chapter_id, data_saver, cache_key)
+                    self._execute_athome_fetch(source_chapter_id, data_saver, cache_key, provider_id)
                 )
                 _ATHOME_IN_FLIGHT[cache_key] = task
 
@@ -170,11 +176,12 @@ class ReaderService:
         source_chapter_id: str,
         data_saver: bool,
         cache_key: str,
+        provider_id: str = "mangadex",
     ) -> ProviderPagesResult:
         """
         Execute AtHome provider fetch, update cache, and ensure cleanup from in-flight map.
         """
-        provider = self.registry.get("mangadex")
+        provider = self.registry.get(provider_id)
         try:
             result = await provider.get_chapter_pages(
                 provider_chapter_id=source_chapter_id,
@@ -188,7 +195,12 @@ class ReaderService:
         except HTTPException:
             raise
         except Exception as exc:
-            logger.error("Failed to load AtHome pages for chapter %s: %s", source_chapter_id, exc)
+            logger.error(
+                "Failed to load pages for chapter %s from provider %s: %s",
+                source_chapter_id,
+                provider_id,
+                exc,
+            )
             raise HTTPException(status_code=502, detail=f"Remote provider error: {exc}") from exc
         finally:
             async with _ATHOME_LOCK:
@@ -217,10 +229,11 @@ class ReaderService:
         # Find chapter and ensure it belongs to this manga
         cursor.execute(
             """
-            SELECT id, manga_id, source_chapter_id, chapter_number, volume_number,
-                   title, language, scanlation_group
-            FROM chapters
-            WHERE id = ? AND manga_id = ?
+            SELECT c.id, c.manga_id, c.source_chapter_id, c.chapter_number, c.volume_number,
+                   c.title, c.language, c.scanlation_group, ms.source_name
+            FROM chapters c
+            LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+            WHERE c.id = ? AND c.manga_id = ?
             """,
             (chapter_id, manga_id),
         )
@@ -232,6 +245,7 @@ class ReaderService:
             raise HTTPException(status_code=400, detail="Only Russian chapters are supported")
 
         source_ch_id = ch_row["source_chapter_id"]
+        provider_id = ch_row["source_name"] or "mangadex"
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID not configured")
 
@@ -263,7 +277,9 @@ class ReaderService:
                 next_chapter_id = all_chapters[current_idx + 1]["id"]
 
         # Fetch fresh/cached AtHome pages
-        athome_res = await self.get_athome_pages(source_ch_id, data_saver=False)
+        athome_res = await self.get_athome_pages(
+            source_ch_id, data_saver=False, provider_id=provider_id
+        )
 
         pages = [
             ChapterReaderPageItem(
@@ -294,12 +310,18 @@ class ReaderService:
         data_saver: bool = False,
     ) -> Tuple[bytes, str]:
         """
-        Securely stream a specific page image by resolving its AtHome URL on backend.
-        Validates target URL against SSRF and forbids redirects.
+        Securely stream a specific page image by resolving its URL on backend.
+        Validates target URL against SSRF, validates redirects, injects Referer for Manga-Chan,
+        and sniffs Content-Type (supporting AVIF, WEBP, PNG, JPEG).
         """
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT source_chapter_id, language FROM chapters WHERE id = ?",
+            """
+            SELECT c.source_chapter_id, c.language, ms.source_name
+            FROM chapters c
+            LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+            WHERE c.id = ?
+            """,
             (chapter_id,),
         )
         row = cursor.fetchone()
@@ -310,11 +332,14 @@ class ReaderService:
             raise HTTPException(status_code=400, detail="Only Russian chapters are permitted")
 
         source_ch_id = row["source_chapter_id"]
+        provider_id = row["source_name"] or "mangadex"
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID missing")
 
         # Resolve pages (with automatic retry / refresh if expired)
-        athome_res = await self.get_athome_pages(source_ch_id, data_saver=data_saver)
+        athome_res = await self.get_athome_pages(
+            source_ch_id, data_saver=data_saver, provider_id=provider_id
+        )
 
         if not (1 <= page_number <= len(athome_res.pages)):
             raise HTTPException(
@@ -327,21 +352,34 @@ class ReaderService:
         # Enhanced SSRF protection validation
         validate_and_resolve_url_ssrf(target_url)
 
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"
+        }
+        if provider_id == "mangachan" or ".manga-chan.me" in target_url:
+            req_headers["Referer"] = f"https://im.manga-chan.me/online/{source_ch_id}.html"
+
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-                resp = await client.get(target_url, headers={"User-Agent": "Onigiri-App/1.0"})
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+                resp = await client.get(target_url, headers=req_headers)
 
                 # If MangaDex@Home token expired (404/504), refresh AtHome server once and retry
-                if resp.status_code in (404, 502, 504):
+                if provider_id == "mangadex" and resp.status_code in (404, 502, 504):
                     logger.info("AtHome node returned %d, refreshing server token for %s", resp.status_code, source_ch_id)
-                    fresh_res = await self.get_athome_pages(source_ch_id, data_saver=data_saver, force_refresh=True)
+                    fresh_res = await self.get_athome_pages(
+                        source_ch_id, data_saver=data_saver, force_refresh=True, provider_id=provider_id
+                    )
                     if 1 <= page_number <= len(fresh_res.pages):
                         target_url = fresh_res.pages[page_number - 1].image_url
                         validate_and_resolve_url_ssrf(target_url)
-                        resp = await client.get(target_url, headers={"User-Agent": "Onigiri-App/1.0"})
+                        resp = await client.get(target_url, headers=req_headers)
 
+                # Safe redirect handling with full SSRF re-validation
                 if resp.status_code in (301, 302, 307, 308):
-                    raise HTTPException(status_code=502, detail="SSRF protection: Remote server attempted redirect")
+                    redirect_target = resp.headers.get("location")
+                    if not redirect_target:
+                        raise HTTPException(status_code=502, detail="SSRF protection: Redirect without Location header")
+                    validate_and_resolve_url_ssrf(redirect_target)
+                    resp = await client.get(redirect_target, headers=req_headers)
 
                 if resp.status_code != 200:
                     raise HTTPException(
@@ -349,8 +387,23 @@ class ReaderService:
                         detail=f"Failed to fetch page from image server (HTTP {resp.status_code})",
                     )
 
+                raw_bytes = resp.content
+                if len(raw_bytes) > 15 * 1024 * 1024:
+                    raise HTTPException(status_code=502, detail="Image payload exceeds 15MB limit")
+
                 content_type = resp.headers.get("content-type", "image/jpeg")
-                return resp.content, content_type
+
+                # Sniff binary magic bytes for image formats
+                if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
+                    content_type = "image/avif"
+                elif len(raw_bytes) >= 3 and raw_bytes[:3] == b"\xff\xd8\xff":
+                    content_type = "image/jpeg"
+                elif len(raw_bytes) >= 8 and raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                    content_type = "image/png"
+                elif len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+                    content_type = "image/webp"
+
+                return raw_bytes, content_type
 
         except httpx.RequestError as exc:
             raise HTTPException(status_code=502, detail=f"Remote network error: {exc}") from exc
