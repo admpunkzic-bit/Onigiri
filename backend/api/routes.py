@@ -88,6 +88,23 @@ def get_reader_service(
     return ReaderService(conn=conn, registry=registry)
 
 
+def get_enable_mangadex(
+    request: Request,
+    enable_mangadex: Optional[bool] = Query(None, description="Enable or disable MangaDex fallback"),
+) -> bool:
+    """
+    Determine whether MangaDex reserve source and fallback is active.
+    Checked via ?enable_mangadex query parameter, then X-Enable-MangaDex header.
+    Defaults to True.
+    """
+    if enable_mangadex is not None:
+        return enable_mangadex
+    header_val = request.headers.get("x-enable-mangadex")
+    if header_val is not None:
+        return header_val.strip().lower() in ("1", "true", "yes", "on")
+    return True
+
+
 # ==============================================================================
 # Health Check
 # ==============================================================================
@@ -130,12 +147,14 @@ async def search_manga(
     sort_order: str = Query("desc", description="Sort order: asc, desc"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Items per page"),
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
     Search and filter manga across the unified Onigiri catalog.
     Supports full-text query, genre inclusion/exclusion, format types, status,
     author/artist, release year, custom sorting, and pagination without exposing provider names.
+    Respects enable_mangadex toggle for external fallback searches.
     """
     return await catalog_service.search(
         query=q,
@@ -149,6 +168,7 @@ async def search_manga(
         sort_order=sort_order,
         page=page,
         limit=limit,
+        enable_mangadex=enable_mangadex,
     )
 
 
@@ -220,13 +240,14 @@ async def get_manga_cover(
 @router.get("/manga/{id_or_slug}", response_model=MangaDetailRead)
 async def get_manga_detail(
     id_or_slug: str,
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
     Get full manga details by Onigiri ID or slug.
     Returns unified manga card. External sources are sanitized/omitted.
     """
-    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug)
+    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug, enable_mangadex=enable_mangadex)
     if not manga:
         raise HTTPException(status_code=404, detail="Manga not found")
     return manga
@@ -236,6 +257,7 @@ async def get_manga_detail(
 async def get_manga_chapters_list(
     id_or_slug: str,
     order: str = Query("asc", description="Sort order: 'asc' or 'desc'"),
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
@@ -243,7 +265,9 @@ async def get_manga_chapters_list(
     Sorted by chapter number. Sources are sanitized and not exposed.
     """
     clean_order = order.lower() if order.lower() in ("asc", "desc") else "asc"
-    chapters = await catalog_service.get_chapters_for_manga(id_or_slug, order=clean_order)
+    chapters = await catalog_service.get_chapters_for_manga(
+        id_or_slug, order=clean_order, enable_mangadex=enable_mangadex
+    )
     if chapters is None:
         raise HTTPException(status_code=404, detail="Manga not found")
     return chapters
@@ -252,16 +276,17 @@ async def get_manga_chapters_list(
 @router.post("/manga/{id_or_slug}/sync")
 async def sync_manga_chapters_endpoint(
     id_or_slug: str,
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
     Force synchronization of Russian chapters for a manga from external providers.
     Returns count of synced chapters. Idempotent.
     """
-    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug, auto_sync_chapters=False)
+    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug, auto_sync_chapters=False, enable_mangadex=enable_mangadex)
     if not manga:
         raise HTTPException(status_code=404, detail="Manga not found")
-    chapters = await catalog_service.sync_manga_chapters(manga.id)
+    chapters = await catalog_service.sync_manga_chapters(manga.id, enable_mangadex=enable_mangadex)
     return {
         "status": "ok",
         "manga_id": manga.id,
@@ -277,13 +302,14 @@ async def sync_manga_chapters_endpoint(
 async def get_chapter_reader_pages(
     id_or_slug: str,
     chapter_id: int,
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     reader_service: ReaderService = Depends(get_reader_service),
 ):
     """
     Get reader metadata, ordered pages list, and adjacent chapter navigation pointers.
     All page images use internal Onigiri backend endpoints (/api/manga/chapters/{id}/pages/{n}).
     """
-    return await reader_service.get_chapter_reader_detail(id_or_slug, chapter_id)
+    return await reader_service.get_chapter_reader_detail(id_or_slug, chapter_id, enable_mangadex=enable_mangadex)
 
 
 @router.get("/manga/chapters/{chapter_id}/pages/{page_number}")
@@ -291,6 +317,7 @@ async def get_page_image(
     chapter_id: int,
     page_number: int,
     data_saver: bool = Query(False, description="Use dataSaver compressed image"),
+    enable_mangadex: bool = Depends(get_enable_mangadex),
     reader_service: ReaderService = Depends(get_reader_service),
 ):
     """
@@ -301,6 +328,7 @@ async def get_page_image(
         chapter_id=chapter_id,
         page_number=page_number,
         data_saver=data_saver,
+        enable_mangadex=enable_mangadex,
     )
     return Response(
         content=image_bytes,

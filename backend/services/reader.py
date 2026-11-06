@@ -214,9 +214,11 @@ class ReaderService:
         self,
         id_or_slug: str,
         chapter_id: int,
+        enable_mangadex: bool = True,
     ) -> ChapterReaderDetailRead:
         """
         Get metadata, ordered pages list, and adjacent chapter pointers for the reader.
+        Respects enable_mangadex toggle for primary and fallback attempts.
         """
         cursor = self.conn.cursor()
 
@@ -288,17 +290,21 @@ class ReaderService:
         actual_provider_id = provider_id
         actual_source_ch_id = source_ch_id
 
-        try:
-            athome_res = await self.get_athome_pages(
-                source_ch_id, data_saver=False, provider_id=provider_id
-            )
-            if not athome_res.pages:
-                raise ValueError("Provider returned 0 pages")
-        except Exception as primary_err:
-            logger.warning(
-                "Primary fetch for chapter %d (source %s, %s) failed: %s. Looking for fallback...",
-                chapter_id, source_ch_id, provider_id, primary_err
-            )
+        can_try_primary = not (provider_id == "mangadex" and not enable_mangadex)
+        if can_try_primary:
+            try:
+                athome_res = await self.get_athome_pages(
+                    source_ch_id, data_saver=False, provider_id=provider_id
+                )
+                if not athome_res.pages:
+                    raise ValueError("Provider returned 0 pages")
+            except Exception as primary_err:
+                logger.warning(
+                    "Primary fetch for chapter %d (source %s, %s) failed: %s. Looking for fallback...",
+                    chapter_id, source_ch_id, provider_id, primary_err
+                )
+
+        if not athome_res or not athome_res.pages:
             cursor.execute(
                 """
                 SELECT c.id, c.source_chapter_id, ms.source_name
@@ -320,6 +326,8 @@ class ReaderService:
             for cand in candidates:
                 cand_source_id = cand["source_chapter_id"]
                 cand_provider = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+                if cand_provider == "mangadex" and not enable_mangadex:
+                    continue
                 try:
                     alt_res = await self.get_athome_pages(
                         cand_source_id, data_saver=False, provider_id=cand_provider
@@ -338,6 +346,8 @@ class ReaderService:
                     logger.debug("Alternative candidate %d failed: %s", cand["id"], cand_err)
 
             if not athome_res or not athome_res.pages:
+                if provider_id == "mangadex" and not enable_mangadex:
+                    raise HTTPException(status_code=403, detail="Источник MangaDex отключён в настройках")
                 raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника")
 
         pages = [
@@ -369,11 +379,13 @@ class ReaderService:
         chapter_id: int,
         page_number: int,
         data_saver: bool = False,
+        enable_mangadex: bool = True,
     ) -> Tuple[bytes, str]:
         """
         Securely stream a specific page image by resolving its URL on backend.
         Validates target URL against SSRF, validates redirects, injects Referer for Manga-Chan,
         and sniffs Content-Type (supporting AVIF, WEBP, PNG, JPEG).
+        Respects enable_mangadex toggle and falls back across providers and dataSaver modes.
         """
         cursor = self.conn.cursor()
         cursor.execute(
@@ -417,11 +429,21 @@ class ReaderService:
         )
         alternative_chapters = cursor.fetchall()
 
-        # Build candidate queue: primary first, then alternatives
-        candidates = [(source_ch_id, provider_id)]
+        # Build candidate queue: primary first, then alternatives (respecting enable_mangadex)
+        candidates = []
+        if not (provider_id == "mangadex" and not enable_mangadex):
+            candidates.append((source_ch_id, provider_id))
+
         for alt in alternative_chapters:
             alt_prov = alt["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+            if alt_prov == "mangadex" and not enable_mangadex:
+                continue
             candidates.append((alt["source_chapter_id"], alt_prov))
+
+        if not candidates:
+            if provider_id == "mangadex" and not enable_mangadex:
+                raise HTTPException(status_code=403, detail="Источник MangaDex отключён в настройках")
+            raise HTTPException(status_code=404, detail="No eligible chapter source found")
 
         last_error = None
         for current_ch_id, current_prov in candidates:
@@ -455,9 +477,9 @@ class ReaderService:
                     while redirect_count < max_redirects:
                         resp = await client.get(current_url, headers=req_headers)
 
-                        # If MangaDex@Home token expired (404/502/504), refresh AtHome server once and retry
+                        # If MangaDex@Home node returned 404/502/504, perform automated token refresh and data-saver fallback
                         if current_prov == "mangadex" and resp.status_code in (404, 502, 504) and redirect_count == 0:
-                            logger.info("AtHome node returned %d, refreshing server token for %s", resp.status_code, current_ch_id)
+                            logger.info("AtHome node returned %d for %s (data_saver=%s), refreshing server token...", resp.status_code, current_ch_id, data_saver)
                             fresh_res = await self.get_athome_pages(
                                 current_ch_id, data_saver=data_saver, force_refresh=True, provider_id=current_prov
                             )
@@ -467,6 +489,19 @@ class ReaderService:
                                     fresh_url = "https://" + fresh_url[7:]
                                 current_url = validate_and_resolve_url_ssrf(fresh_url)
                                 resp = await client.get(current_url, headers=req_headers)
+
+                            # If still failing and we were requesting full resolution, fall back to dataSaver
+                            if resp.status_code in (404, 502, 504) and not data_saver:
+                                logger.info("AtHome node still returned %d, falling back to data_saver=True for %s", resp.status_code, current_ch_id)
+                                saver_res = await self.get_athome_pages(
+                                    current_ch_id, data_saver=True, force_refresh=False, provider_id=current_prov
+                                )
+                                if 1 <= page_number <= len(saver_res.pages):
+                                    saver_url = saver_res.pages[page_number - 1].image_url
+                                    if saver_url.startswith("http://"):
+                                        saver_url = "https://" + saver_url[7:]
+                                    current_url = validate_and_resolve_url_ssrf(saver_url)
+                                    resp = await client.get(current_url, headers=req_headers)
 
                         # Safe redirect handling with full SSRF re-validation and urljoin for relative targets
                         if resp.status_code in (301, 302, 303, 307, 308):

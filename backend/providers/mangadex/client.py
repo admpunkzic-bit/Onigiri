@@ -165,8 +165,8 @@ class MangaDexHttpClient:
         return await self._request("GET", f"/manga/{manga_id}/feed", params=params)
 
     async def get_at_home_server(self, chapter_id: str) -> Dict[str, Any]:
-        """Get MangaDex@Home base URL and file hashes for chapter pages."""
-        return await self._request("GET", f"/at-home/server/{chapter_id}")
+        """Get MangaDex@Home base URL and file hashes for chapter pages, forcing port 443 for reliable SSL and caching."""
+        return await self._request("GET", f"/at-home/server/{chapter_id}", params={"forcePort443": "true"})
 
     async def close(self) -> None:
         """Close underlying HTTP client."""

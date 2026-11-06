@@ -260,6 +260,32 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* Section: Источники данных */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-wider px-1">
+          Источники данных
+        </h2>
+
+        {/* Резервный источник MangaDex */}
+        <div className="flex items-center justify-between gap-4 py-3.5 px-4 bg-surface rounded-xl border border-white/5">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-text-primary">
+              Резервный источник MangaDex
+            </p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              Использовать MangaDex для поиска недостающих глав и резервной загрузки
+            </p>
+          </div>
+          <Toggle
+            checked={settings.enableMangaDex}
+            onChange={(val) => {
+              updateSettings({ enableMangaDex: val })
+              triggerToast(val ? 'Резервный источник MangaDex включён' : 'Резервный источник MangaDex отключён')
+            }}
+          />
+        </div>
+      </section>
+
       {/* Section 3: Хранилище */}
       <section className="space-y-3">
         <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-wider px-1">

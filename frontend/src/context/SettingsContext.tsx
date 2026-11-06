@@ -14,6 +14,7 @@ export interface AppSettings {
   autoNextChapter: boolean
   preloadPages: boolean
   autoHideControls: boolean
+  enableMangaDex: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -23,6 +24,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoNextChapter: true,
   preloadPages: true,
   autoHideControls: true,
+  enableMangaDex: true,
 }
 
 const SETTINGS_STORAGE_KEY = 'onigiri_app_settings'

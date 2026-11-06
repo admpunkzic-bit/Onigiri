@@ -330,10 +330,11 @@ class CatalogService:
         sort_order: str = "desc",
         page: int = 1,
         limit: int = 20,
+        enable_mangadex: bool = True,
     ) -> List[MangaListRead]:
         """
         Unified search and multi-criteria catalog filtering endpoint.
-        - Prioritizes Manga-Chan as PRIMARY and MangaDex as RESERVE for external search.
+        - Prioritizes Manga-Chan as PRIMARY and MangaDex as RESERVE (if enabled) for external search.
         - Supports text queries (FTS5 + LIKE fallback), genre inclusion/exclusion, format types,
           publication status, author/artist, release year, custom sorting, and pagination.
         - Utilizes composite database indexes for sub-millisecond sorting and query plan efficiency.
@@ -343,7 +344,7 @@ class CatalogService:
         clean_genres = sorted([g.strip() for g in (genres or []) if g.strip()])
         clean_ex_genres = sorted([g.strip() for g in (excluded_genres or []) if g.strip()])
         cache_key = (
-            f"{clean_query.lower()}_{clean_genres}_{clean_ex_genres}_"
+            f"{enable_mangadex}_{clean_query.lower()}_{clean_genres}_{clean_ex_genres}_"
             f"{manga_type}_{status}_{author}_{release_year}_{sort_by}_{sort_order}_{page}_{limit}"
         )
 
@@ -370,7 +371,7 @@ class CatalogService:
                 )
                 task_providers.append("mangachan")
 
-            if self.registry.has("mangadex"):
+            if self.registry.has("mangadex") and enable_mangadex:
                 dex_prov = self.registry.get("mangadex")
                 tasks.append(
                     asyncio.wait_for(
@@ -554,12 +555,13 @@ class CatalogService:
         )
         return cursor.fetchone()
 
-    def _load_manga_chapters(self, manga_id: int, order: str = "asc") -> List[ChapterRead]:
+    def _load_manga_chapters(self, manga_id: int, order: str = "asc", enable_mangadex: bool = True) -> List[ChapterRead]:
         """
         Load chapters for manga with ordering by chapter number.
         Deduplicates identical chapter releases in favor of Manga-Chan (Primary),
         while strictly preserving distinct alternative translations (different scanlation groups).
         Does NOT merge ambiguous chapters that differ by title, volume, or translation group.
+        Excludes MangaDex chapters if enable_mangadex is False.
         """
         cursor = self.conn.cursor()
         order_dir = "ASC" if order.lower() == "asc" else "DESC"
@@ -584,7 +586,7 @@ class CatalogService:
         for r in raw_rows:
             if r["source_name"] == "mangachan":
                 primary_rows.append(r)
-            else:
+            elif enable_mangadex:
                 reserve_rows.append(r)
 
         # Helper to check if a reserve row is an identical release of a primary row
@@ -662,19 +664,19 @@ class CatalogService:
         )
         return chapters
 
-    async def sync_manga_chapters(self, manga_id: int) -> List[ChapterRead]:
+    async def sync_manga_chapters(self, manga_id: int, enable_mangadex: bool = True) -> List[ChapterRead]:
         """
         Fetch all Russian chapters with Manga-Chan as PRIMARY and MangaDex as RESERVE.
         1. Discovers and links Manga-Chan source if not yet connected to this manga.
         2. Syncs Manga-Chan chapters first.
         3. Evaluates available Russian chapters count.
-        4. If Manga-Chan has chapters (> 0), uses Manga-Chan as primary and supplements from MangaDex.
-        5. If Manga-Chan has 0 chapters or fails, falls back to MangaDex.
+        4. If Manga-Chan has chapters (> 0), uses Manga-Chan as primary and supplements from MangaDex (if enabled).
+        5. If Manga-Chan has 0 chapters or fails, falls back to MangaDex (if enabled).
         6. Transient network errors (429, 502, 503, timeout) are retried and do not delete existing data.
         7. Reconciles into canonical_chapters without duplicates while preserving alternative translations.
         """
         if not self.registry:
-            return self._load_manga_chapters(manga_id)
+            return self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
 
         cursor = self.conn.cursor()
 
@@ -732,13 +734,13 @@ class CatalogService:
                 except Exception as exc:
                     logger.warning("Error discovering Manga-Chan for manga %d: %s", manga_id, exc)
 
-        # Step 2: Ensure MangaDex is also linked if possible so we can supplement chapters
+        # Step 2: Ensure MangaDex is also linked if possible and enabled, so we can supplement chapters
         cursor.execute(
             "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangadex'",
             (manga_id,),
         )
         dex_source = cursor.fetchone()
-        if not dex_source and self.registry.has("mangadex"):
+        if not dex_source and self.registry.has("mangadex") and enable_mangadex:
             cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
             m_info = cursor.fetchone()
             if m_info:
@@ -797,6 +799,9 @@ class CatalogService:
             src_id = src["id"]
             src_name = src["source_name"]
             src_manga_id = src["source_manga_id"]
+
+            if src_name == "mangadex" and not enable_mangadex:
+                continue
 
             if not self.registry.has(src_name):
                 continue
@@ -898,12 +903,13 @@ class CatalogService:
         )
         self.conn.commit()
 
-        return self._load_manga_chapters(manga_id)
+        return self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
 
     async def get_manga_by_id_or_slug(
         self,
         id_or_slug: str,
         auto_sync_chapters: bool = True,
+        enable_mangadex: bool = True,
     ) -> Optional[MangaDetailRead]:
         """
         Retrieve manga details by internal Onigiri ID, unique slug, or external provider UUID.
@@ -929,7 +935,7 @@ class CatalogService:
                 except Exception as exc:
                     logger.debug("Identifier '%s' could not be resolved via Manga-Chan: %s", clean_identifier, exc)
 
-            if not row and self.registry.has("mangadex"):
+            if not row and self.registry.has("mangadex") and enable_mangadex:
                 try:
                     dex_provider = self.registry.get("mangadex")
                     external_item = await dex_provider.get_manga_details(clean_identifier)
@@ -989,9 +995,9 @@ class CatalogService:
         chapters_count = cursor.fetchone()[0]
 
         if chapters_count == 0 and auto_sync_chapters and self.registry:
-            chapters = await self.sync_manga_chapters(manga_id)
+            chapters = await self.sync_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
         else:
-            chapters = self._load_manga_chapters(manga_id)
+            chapters = self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
 
         current_cover = row["cover_url"]
         if not current_cover:
@@ -1034,12 +1040,14 @@ class CatalogService:
         self,
         id_or_slug: str,
         order: str = "asc",
+        enable_mangadex: bool = True,
     ) -> Optional[List[ChapterRead]]:
         """Retrieve chapter list for a manga by ID, slug, or external UUID with specified ordering."""
         row = self._find_manga_row(id_or_slug)
         if not row:
             return None
         manga_id = row["id"]
+        return self._load_manga_chapters(manga_id, order=order, enable_mangadex=enable_mangadex)
 
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))

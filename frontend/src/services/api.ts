@@ -14,8 +14,9 @@ import type {
   ReadingProgress,
 } from '../types/manga'
 
-export const API_BASE_URL: string =
-  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
+export const API_BASE_URL: string = (
+  import.meta.env.VITE_API_BASE_URL || '/api'
+).replace(/http:\/\/localhost:/g, 'http://127.0.0.1:')
 
 export function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
@@ -83,6 +84,21 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
   if (tgInitData && tgInitData.trim().length > 0) {
     headers['Authorization'] = `Telegram ${tgInitData.trim()}`
+  }
+
+  // Forward MangaDex toggle state from localStorage
+  try {
+    const rawSettings = typeof window !== 'undefined' ? localStorage.getItem('onigiri_app_settings') : null
+    if (rawSettings) {
+      const parsed = JSON.parse(rawSettings)
+      if (parsed.enableMangaDex === false) {
+        headers['X-Enable-MangaDex'] = '0'
+      } else {
+        headers['X-Enable-MangaDex'] = '1'
+      }
+    }
+  } catch {
+    // Ignore storage parse errors
   }
 
   try {
@@ -193,15 +209,23 @@ export async function fetchChapterPages(
     `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters/${chapterId}/pages`,
     { signal }
   )
-  const baseUrl = (API_BASE_URL || 'http://localhost:8000/api').replace(/\/api\/?$/, '')
+  const baseUrl = API_BASE_URL.replace(/\/api\/?$/, '')
   return {
     ...data,
-    pages: data.pages.map((p) => ({
-      ...p,
-      image_url: p.image_url.startsWith('http')
-        ? p.image_url
-        : `${baseUrl}${p.image_url.startsWith('/') ? '' : '/'}${p.image_url}`,
-    })),
+    pages: data.pages.map((p) => {
+      let img = p.image_url
+      if (!img.startsWith('http')) {
+        img = baseUrl
+          ? `${baseUrl}${img.startsWith('/') ? '' : '/'}${img}`
+          : img.startsWith('/')
+            ? img
+            : `/${img}`
+      }
+      return {
+        ...p,
+        image_url: img,
+      }
+    }),
   }
 }
 

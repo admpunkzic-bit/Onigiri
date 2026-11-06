@@ -35,9 +35,10 @@ export default function PageImage({
   }
 
   // Normalize source URL: if it's a relative /api path, resolve against API host
+  const normalizedBase = API_BASE_URL.replace(/http:\/\/localhost:/g, 'http://127.0.0.1:').replace(/\/api\/?$/, '')
   const normalizedSrc = src.startsWith('/api')
-    ? `${API_BASE_URL.replace(/\/api\/?$/, '')}${src}`
-    : src
+    ? (normalizedBase ? `${normalizedBase}${src}` : src)
+    : src.replace(/http:\/\/localhost:/g, 'http://127.0.0.1:')
 
   // Add retry bust query if retrying
   const currentSrc =
