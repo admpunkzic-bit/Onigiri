@@ -462,13 +462,20 @@ class ReaderService:
                     raw_target_url = "https://" + raw_target_url[7:]
                 target_url = validate_and_resolve_url_ssrf(raw_target_url)
 
-                req_headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"
-                }
-                if current_prov == "mangachan" or ".manga-chan.me" in target_url:
-                    req_headers["Referer"] = f"https://im.manga-chan.me/online/{current_ch_id}.html"
+                is_mangachan_target = (current_prov == "mangachan" or ".manga-chan.me" in target_url)
+                if is_mangachan_target:
+                    req_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": f"https://im.manga-chan.me/online/{current_ch_id}.html",
+                    }
+                    verify_ssl = False
+                else:
+                    req_headers = {
+                        "User-Agent": "Onigiri-App/1.0",
+                    }
+                    verify_ssl = True
 
-                async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
+                async with httpx.AsyncClient(timeout=20.0, verify=verify_ssl, follow_redirects=False) as client:
                     current_url = target_url
                     max_redirects = 5
                     redirect_count = 0
@@ -478,7 +485,7 @@ class ReaderService:
                         resp = await client.get(current_url, headers=req_headers)
 
                         # If MangaDex@Home node returned 404/502/504, perform automated token refresh and data-saver fallback
-                        if current_prov == "mangadex" and resp.status_code in (404, 502, 504) and redirect_count == 0:
+                        if current_prov == "mangadex" and resp.status_code in (404, 502, 504):
                             logger.info("AtHome node returned %d for %s (data_saver=%s), refreshing server token...", resp.status_code, current_ch_id, data_saver)
                             fresh_res = await self.get_athome_pages(
                                 current_ch_id, data_saver=data_saver, force_refresh=True, provider_id=current_prov
@@ -508,6 +515,8 @@ class ReaderService:
                             redirect_target = resp.headers.get("location")
                             if not redirect_target:
                                 raise HTTPException(status_code=502, detail="SSRF protection: Redirect without Location header")
+                            if "mangadex.org/edge/challenge" in redirect_target:
+                                raise HTTPException(status_code=502, detail="Remote host anti-bot challenge encountered")
                             resolved_target = urljoin(current_url, redirect_target)
                             if resolved_target.startswith("http://"):
                                 resolved_target = "https://" + resolved_target[7:]
@@ -528,9 +537,8 @@ class ReaderService:
                     if len(raw_bytes) > 15 * 1024 * 1024:
                         raise HTTPException(status_code=502, detail="Image payload exceeds 15MB limit")
 
-                    content_type = resp.headers.get("content-type", "image/jpeg")
-
                     # Sniff binary magic bytes for image formats
+                    content_type = None
                     if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
                         content_type = "image/avif"
                     elif len(raw_bytes) >= 3 and raw_bytes[:3] == b"\xff\xd8\xff":
@@ -539,6 +547,15 @@ class ReaderService:
                         content_type = "image/png"
                     elif len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
                         content_type = "image/webp"
+                    elif len(raw_bytes) >= 6 and (raw_bytes[:6] == b"GIF87a" or raw_bytes[:6] == b"GIF89a"):
+                        content_type = "image/gif"
+
+                    if not content_type:
+                        header_ct = resp.headers.get("content-type", "")
+                        if header_ct.startswith("image/"):
+                            content_type = header_ct
+                        else:
+                            raise HTTPException(status_code=502, detail="Image server returned non-image content")
 
                     return raw_bytes, content_type
 

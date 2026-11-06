@@ -172,6 +172,22 @@ async def search_manga(
     )
 
 
+# Helper to sniff binary image magic bytes
+def _sniff_image_type(raw_bytes: bytes) -> Optional[str]:
+    """Sniff binary magic bytes to determine image MIME type, or None if not an image."""
+    if len(raw_bytes) >= 3 and raw_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(raw_bytes) >= 8 and raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    if len(raw_bytes) >= 6 and (raw_bytes[:6] == b"GIF87a" or raw_bytes[:6] == b"GIF89a"):
+        return "image/gif"
+    if len(raw_bytes) >= 12 and raw_bytes[4:12] == b"ftypavif":
+        return "image/avif"
+    return None
+
+
 # In-memory LRU cache for cover images: URL -> (content_bytes, content_type)
 _COVER_CACHE: OrderedDict[str, Tuple[bytes, str]] = OrderedDict()
 _MAX_COVER_CACHE_ITEMS = 500
@@ -200,39 +216,82 @@ async def get_manga_cover(
         if clean_url in _COVER_CACHE:
             _COVER_CACHE.move_to_end(clean_url)
             cached_content, cached_type = _COVER_CACHE[clean_url]
-            return Response(
-                content=cached_content,
-                media_type=cached_type,
-                headers={
-                    "Cache-Control": "public, max-age=604800, immutable",
-                },
-            )
+            # Safety check: ensure cached entry is not HTML, otherwise evict poisoned cache
+            if not cached_content.strip().startswith((b"<!DOCTYPE", b"<!doctype", b"<html", b"<HTML")):
+                return Response(
+                    content=cached_content,
+                    media_type=cached_type,
+                    headers={
+                        "Cache-Control": "public, max-age=604800, immutable",
+                    },
+                )
+            else:
+                del _COVER_CACHE[clean_url]
 
-    req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri-App/1.0"}
-    if "manga-chan.me" in clean_url:
-        req_headers["Referer"] = "https://im.manga-chan.me/"
+    is_mangachan = "manga-chan.me" in clean_url
+    is_mangadex = "mangadex.org" in clean_url
+
+    if is_mangachan:
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://im.manga-chan.me/",
+        }
+        verify_ssl = False
+        follow_redirects = True
+    elif is_mangadex:
+        # MangaDex CDN edge requires clean application User-Agent.
+        # Chrome User-Agent without session cookies triggers edge/challenge (Cloudflare/POWBlock).
+        req_headers = {
+            "User-Agent": "Onigiri-App/1.0",
+        }
+        verify_ssl = True
+        follow_redirects = False
+    else:
+        req_headers = {
+            "User-Agent": "Onigiri-App/1.0",
+        }
+        verify_ssl = True
+        follow_redirects = False
 
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=verify_ssl, follow_redirects=follow_redirects) as client:
             resp = await client.get(clean_url, headers=req_headers)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                # Anti-bot redirect encountered; do not follow to HTML challenge
+                raise HTTPException(status_code=502, detail="Remote host issued unexpected redirect")
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Failed to load cover from remote host")
 
-            content_type = resp.headers.get("content-type", "image/jpeg")
             content_bytes = resp.content
+            if len(content_bytes) > 15 * 1024 * 1024:
+                raise HTTPException(status_code=502, detail="Cover image exceeds size limit")
+
+            if content_bytes.strip().startswith((b"<!DOCTYPE", b"<!doctype", b"<html", b"<HTML")):
+                raise HTTPException(status_code=502, detail="Remote host returned non-image response")
+
+            # Validate binary magic bytes or explicit image content-type
+            sniffed_type = _sniff_image_type(content_bytes)
+            if not sniffed_type:
+                resp_ct = resp.headers.get("content-type", "")
+                if resp_ct.startswith("image/"):
+                    sniffed_type = resp_ct
+                else:
+                    raise HTTPException(status_code=502, detail="Remote host returned non-image response")
 
             async with _COVER_CACHE_LOCK:
-                _COVER_CACHE[clean_url] = (content_bytes, content_type)
+                _COVER_CACHE[clean_url] = (content_bytes, sniffed_type)
                 if len(_COVER_CACHE) > _MAX_COVER_CACHE_ITEMS:
                     _COVER_CACHE.popitem(last=False)
 
             return Response(
                 content=content_bytes,
-                media_type=content_type,
+                media_type=sniffed_type,
                 headers={
                     "Cache-Control": "public, max-age=604800, immutable",
                 },
             )
+    except HTTPException:
+        raise
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Remote network error: {exc}")
 

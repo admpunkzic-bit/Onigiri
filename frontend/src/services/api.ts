@@ -114,7 +114,16 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, `API error: ${response.status}`)
+    let errorDetail = `API error: ${response.status}`
+    try {
+      const errJson = await response.json()
+      if (errJson && errJson.detail) {
+        errorDetail = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail)
+      }
+    } catch {
+      // Ignore json parse error on non-json error responses
+    }
+    throw new ApiError(response.status, errorDetail)
   }
 
   return response.json() as Promise<T>

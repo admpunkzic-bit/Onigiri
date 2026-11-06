@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 import {
+  ApiError,
   fetchChapterPages,
   fetchReadingProgress,
   saveReadingProgress,
@@ -114,7 +115,11 @@ export default function ReaderPage() {
         }
         if (isMounted) {
           console.error('Failed to load chapter pages:', err)
-          setError('Не удалось загрузить страницы главы. Проверьте подключение к сети.')
+          if (err instanceof ApiError && err.statusCode === 403) {
+            setError(err.message || 'Источник MangaDex отключён в настройках')
+          } else {
+            setError('Не удалось загрузить страницы главы. Проверьте подключение к сети.')
+          }
         }
       } finally {
         if (isMounted) {
