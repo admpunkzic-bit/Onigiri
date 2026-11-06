@@ -551,6 +551,7 @@ class CatalogService:
         Load chapters for manga with ordering by chapter number.
         Deduplicates identical chapter releases in favor of Manga-Chan (Primary),
         while strictly preserving distinct alternative translations (different scanlation groups).
+        Does NOT merge ambiguous chapters that differ by title, volume, or translation group.
         """
         cursor = self.conn.cursor()
         order_dir = "ASC" if order.lower() == "asc" else "DESC"
@@ -568,49 +569,89 @@ class CatalogService:
         )
         raw_rows = cursor.fetchall()
 
-        # Multi-source deduplication:
-        # Prefer Manga-Chan (Primary) for duplicate releases with same number and group,
-        # while keeping distinct alternative translations.
-        seen_keys: Set[Tuple[float, Optional[str]]] = set()
-        chapters: List[ChapterRead] = []
+        # Multi-source deduplication with safe release matching:
+        primary_rows: List[sqlite3.Row] = []
+        reserve_rows: List[sqlite3.Row] = []
 
-        def sort_priority(r: sqlite3.Row) -> int:
-            return 0 if (r["source_name"] == "mangachan") else 1
+        for r in raw_rows:
+            if r["source_name"] == "mangachan":
+                primary_rows.append(r)
+            else:
+                reserve_rows.append(r)
 
-        sorted_rows = sorted(raw_rows, key=sort_priority)
+        # Helper to check if a reserve row is an identical release of a primary row
+        def is_identical_release(prim: sqlite3.Row, resv: sqlite3.Row) -> bool:
+            # 1. Chapter number must match
+            if prim["chapter_number"] != resv["chapter_number"]:
+                return False
 
-        for c in sorted_rows:
-            ch_num = c["chapter_number"] if c["chapter_number"] is not None else 0.0
-            group_key = (c["scanlation_group"] or "").strip().lower()
-            dedup_key = (ch_num, group_key if group_key else None)
+            # 2. Volume number check
+            if prim["volume_number"] is not None and resv["volume_number"] is not None:
+                if prim["volume_number"] != resv["volume_number"]:
+                    return False
 
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
+            # 3. Translation group check
+            g_prim = (prim["scanlation_group"] or "").strip().lower()
+            g_resv = (resv["scanlation_group"] or "").strip().lower()
+            if g_prim and g_resv:
+                if g_prim != g_resv:
+                    # Distinct translation groups -> alternative translations! Keep both.
+                    return False
 
-            chapters.append(
-                ChapterRead(
-                    id=c["id"],
-                    manga_id=c["manga_id"],
-                    manga_source_id=c["manga_source_id"],
-                    source_chapter_id=c["source_chapter_id"],
-                    canonical_chapter_id=c["canonical_chapter_id"],
-                    chapter_number=c["chapter_number"],
-                    volume_number=c["volume_number"],
-                    title=c["title"],
-                    language=c["language"] or "ru",
-                    scanlation_group=c["scanlation_group"],
-                    published_at=c["published_at"],
-                    created_at=c["created_at"],
-                    updated_at=c["updated_at"],
-                )
+            # 4. Title comparison
+            t_prim = normalize_title(prim["title"])
+            t_resv = normalize_title(resv["title"])
+            if t_prim and t_resv:
+                # If titles diverge significantly, don't auto-merge (e.g. extra vs main)
+                if t_prim != t_resv:
+                    return False
+
+            # 5. Specials / zero-numbered chapters require matching titles
+            ch_num = prim["chapter_number"] if prim["chapter_number"] is not None else 0.0
+            if ch_num == 0.0:
+                if t_prim != t_resv:
+                    return False
+
+            return True
+
+        # All primary rows are accepted
+        selected_rows: List[sqlite3.Row] = list(primary_rows)
+
+        # For each reserve row, include it unless it is an identical release of an already accepted row
+        for resv in reserve_rows:
+            is_dup = False
+            for prim in primary_rows:
+                if is_identical_release(prim, resv):
+                    is_dup = True
+                    break
+            if not is_dup:
+                selected_rows.append(resv)
+
+        # Convert to ChapterRead and sort
+        chapters: List[ChapterRead] = [
+            ChapterRead(
+                id=c["id"],
+                manga_id=c["manga_id"],
+                manga_source_id=c["manga_source_id"],
+                source_chapter_id=c["source_chapter_id"],
+                canonical_chapter_id=c["canonical_chapter_id"],
+                chapter_number=c["chapter_number"],
+                volume_number=c["volume_number"],
+                title=c["title"],
+                language=c["language"] or "ru",
+                scanlation_group=c["scanlation_group"],
+                published_at=c["published_at"],
+                created_at=c["created_at"],
+                updated_at=c["updated_at"],
             )
+            for c in selected_rows
+        ]
 
-        if order.lower() == "desc":
-            chapters.sort(key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id), reverse=True)
-        else:
-            chapters.sort(key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id))
-
+        rev = (order.lower() == "desc")
+        chapters.sort(
+            key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id),
+            reverse=rev,
+        )
         return chapters
 
     async def sync_manga_chapters(self, manga_id: int) -> List[ChapterRead]:
@@ -621,7 +662,8 @@ class CatalogService:
         3. Evaluates available Russian chapters count.
         4. If Manga-Chan has chapters (> 0), uses Manga-Chan as primary and supplements from MangaDex.
         5. If Manga-Chan has 0 chapters or fails, falls back to MangaDex.
-        6. Reconciles into canonical_chapters without duplicates while preserving alternative translations.
+        6. Transient network errors (429, 502, 503, timeout) are retried and do not delete existing data.
+        7. Reconciles into canonical_chapters without duplicates while preserving alternative translations.
         """
         if not self.registry:
             return self._load_manga_chapters(manga_id)
@@ -682,13 +724,54 @@ class CatalogService:
                 except Exception as exc:
                     logger.warning("Error discovering Manga-Chan for manga %d: %s", manga_id, exc)
 
-        # Step 2: Fetch and order sources: Manga-Chan (Primary) FIRST, MangaDex SECOND
+        # Step 2: Ensure MangaDex is also linked if possible so we can supplement chapters
+        cursor.execute(
+            "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangadex'",
+            (manga_id,),
+        )
+        dex_source = cursor.fetchone()
+        if not dex_source and self.registry.has("mangadex"):
+            cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+            m_info = cursor.fetchone()
+            if m_info:
+                query_title = m_info["title"]
+                try:
+                    dex_prov = self.registry.get("mangadex")
+                    dex_search = await dex_prov.search(query=query_title, page=1, limit=5, languages=["ru"])
+                    if dex_search.items:
+                        norm_db = normalize_title(query_title)
+                        matching_dex = None
+                        for it in dex_search.items:
+                            all_it = [it.title] + (it.alt_titles or [])
+                            if any(normalize_title(t) == norm_db for t in all_it):
+                                matching_dex = it
+                                break
+                        if matching_dex:
+                            cursor.execute(
+                                """
+                                INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                                VALUES (?, 'mangadex', ?, ?)
+                                ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                                    manga_id = excluded.manga_id,
+                                    source_url = excluded.source_url,
+                                    updated_at = CURRENT_TIMESTAMP
+                                """,
+                                (
+                                    manga_id,
+                                    matching_dex.provider_manga_id,
+                                    matching_dex.source_url,
+                                ),
+                            )
+                            self.conn.commit()
+                except Exception as exc:
+                    logger.debug("MangaDex supplement search error: %s", exc)
+
+        # Step 3: Fetch and order sources: Manga-Chan (Primary) FIRST, MangaDex SECOND
         cursor.execute(
             "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
             (manga_id,),
         )
         sources = cursor.fetchall()
-        # Sort so mangachan is first
         sources.sort(key=lambda s: 0 if s["source_name"] == "mangachan" else 1)
 
         mangachan_chapters_count = 0
@@ -772,7 +855,7 @@ class CatalogService:
                 page += 1
                 await asyncio.sleep(0.05)
 
-        # Step 3: Reconcile into canonical_chapters
+        # Step 4: Reconcile into canonical_chapters
         cursor.execute(
             """
             INSERT OR IGNORE INTO canonical_chapters (manga_id, chapter_number, volume_number, title)
@@ -800,8 +883,6 @@ class CatalogService:
 
         return self._load_manga_chapters(manga_id)
 
-        return self._load_manga_chapters(manga_id)
-
     async def get_manga_by_id_or_slug(
         self,
         id_or_slug: str,
@@ -819,20 +900,9 @@ class CatalogService:
 
         row = self._find_manga_row(clean_identifier)
 
-        # If not found locally, attempt to resolve via registered provider if clean_identifier resembles external ID
+        # If not found locally, attempt to resolve via registered provider: Primary (Manga-Chan), Reserve (MangaDex)
         if not row and self.registry:
-            try:
-                provider = self.registry.get("mangadex")
-                external_item = await provider.get_manga_details(clean_identifier)
-                if external_item:
-                    # Enforce Russian availability check if declared
-                    if not external_item.available_languages or "ru" in external_item.available_languages:
-                        m_id = self.upsert_provider_manga(external_item)
-                        row = self._find_manga_row(str(m_id))
-            except Exception as exc:
-                logger.debug("Identifier '%s' could not be resolved directly via provider: %s", clean_identifier, exc)
-
-            if not row and self.registry.has("mangachan"):
+            if self.registry.has("mangachan"):
                 try:
                     chan_provider = self.registry.get("mangachan")
                     chan_item = await chan_provider.get_manga_details(clean_identifier)
@@ -841,6 +911,17 @@ class CatalogService:
                         row = self._find_manga_row(str(m_id))
                 except Exception as exc:
                     logger.debug("Identifier '%s' could not be resolved via Manga-Chan: %s", clean_identifier, exc)
+
+            if not row and self.registry.has("mangadex"):
+                try:
+                    dex_provider = self.registry.get("mangadex")
+                    external_item = await dex_provider.get_manga_details(clean_identifier)
+                    if external_item:
+                        if not external_item.available_languages or "ru" in external_item.available_languages:
+                            m_id = self.upsert_provider_manga(external_item)
+                            row = self._find_manga_row(str(m_id))
+                except Exception as exc:
+                    logger.debug("Identifier '%s' could not be resolved directly via MangaDex: %s", clean_identifier, exc)
 
         if not row:
             return None

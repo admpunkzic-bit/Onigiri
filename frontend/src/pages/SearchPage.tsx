@@ -233,11 +233,10 @@ export default function SearchPage() {
         <button
           type="button"
           onClick={() => setIsDrawerOpen(true)}
-          className={`flex items-center gap-1.5 px-3.5 py-3 rounded-xl border text-sm font-medium transition-all cursor-pointer ${
-            activeFiltersCount > 0
+          className={`flex items-center gap-1.5 px-3.5 py-3 rounded-xl border text-sm font-medium transition-all cursor-pointer ${activeFiltersCount > 0
               ? 'bg-primary-500/15 border-primary-500/40 text-primary-400'
               : 'bg-surface border-white/5 text-text-secondary hover:text-text-primary hover:border-white/10'
-          }`}
+            }`}
           title="Открыть фильтры"
         >
           <Filter size={18} />

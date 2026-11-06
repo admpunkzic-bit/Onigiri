@@ -229,7 +229,7 @@ class ReaderService:
         # Find chapter and ensure it belongs to this manga
         cursor.execute(
             """
-            SELECT c.id, c.manga_id, c.source_chapter_id, c.chapter_number, c.volume_number,
+            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.volume_number,
                    c.title, c.language, c.scanlation_group, ms.source_name
             FROM chapters c
             LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id

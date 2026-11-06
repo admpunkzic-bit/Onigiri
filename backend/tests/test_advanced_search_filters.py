@@ -109,3 +109,4 @@ def test_search_sorting_by_rating(client: TestClient):
     # Check non-ascending order
     for i in range(len(ratings) - 1):
         assert ratings[i] >= ratings[i + 1] - 0.0001
+
