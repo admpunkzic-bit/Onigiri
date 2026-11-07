@@ -183,6 +183,31 @@ class MangaDetailRead(MangaListRead):
     updated_at: Optional[datetime] = None
     sources: List[MangaSourceRead] = []
     chapters: List[ChapterRead] = []
+    translations: List['TranslationVariantRead'] = []
+    selected_translation_id: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Translation Variant Schemas (TASK 017)
+# ==========================================
+
+class TranslationVariantRead(BaseModel):
+    id: str
+    source_name: str
+    scanlation_group: Optional[str] = None
+    translator_name: str
+    display_name: str
+    chapters_count: int
+    volumes_count: int
+    min_chapter: Optional[float] = None
+    max_chapter: Optional[float] = None
+    has_gaps: bool = False
+    gaps_count: int = 0
+    available_pages_count: int = 0
+    is_working: bool = True
+    is_default: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -206,6 +231,7 @@ class ChapterReaderDetailRead(BaseModel):
     volume_number: Optional[int] = None
     title: Optional[str] = None
     scanlation_group: Optional[str] = None
+    translation_id: Optional[str] = None
     total_pages: int
     pages: List[ChapterReaderPageItem] = []
     prev_chapter_id: Optional[int] = None
@@ -216,11 +242,13 @@ class ReadingProgressUpdate(BaseModel):
     chapter_id: int
     page_number: int = Field(default=1, ge=1)
     total_pages: Optional[int] = None
+    translation_id: Optional[str] = None
 
 
 class ReadingProgressRead(BaseModel):
     manga_id: int
     chapter_id: int
+    translation_id: Optional[str] = None
     chapter_number: Optional[float] = None
     chapter_title: Optional[str] = None
     page_number: int
@@ -235,6 +263,8 @@ class ReadingHistoryItemRead(BaseModel):
     cover_url: Optional[str] = None
     manga_status: Optional[str] = "unknown"
     chapter_id: int
+    translation_id: Optional[str] = None
+    scanlation_group: Optional[str] = None
     chapter_number: Optional[float] = None
     volume_number: Optional[int] = None
     chapter_title: Optional[str] = None

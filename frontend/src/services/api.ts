@@ -194,15 +194,27 @@ export async function fetchMangaSearch(
   return request<MangaItem[]>(`/manga/search?${queryParams.toString()}`, { signal })
 }
 
-export function fetchMangaDetail(idOrSlug: string): Promise<MangaDetail> {
-  return request<MangaDetail>(`/manga/${encodeURIComponent(idOrSlug.trim())}`)
+export function fetchMangaDetail(
+  idOrSlug: string,
+  translationId?: string
+): Promise<MangaDetail> {
+  const queryParams = new URLSearchParams()
+  if (translationId?.trim()) {
+    queryParams.set('translation_id', translationId.trim())
+  }
+  const qs = queryParams.toString() ? `?${queryParams.toString()}` : ''
+  return request<MangaDetail>(`/manga/${encodeURIComponent(idOrSlug.trim())}${qs}`)
 }
 
 export function fetchMangaChapters(
   idOrSlug: string,
-  order: 'asc' | 'desc' = 'asc'
+  order: 'asc' | 'desc' = 'asc',
+  translationId?: string
 ): Promise<ChapterItem[]> {
   const queryParams = new URLSearchParams({ order })
+  if (translationId?.trim()) {
+    queryParams.set('translation_id', translationId.trim())
+  }
   return request<ChapterItem[]>(
     `/manga/${encodeURIComponent(idOrSlug.trim())}/chapters?${queryParams.toString()}`
   )
@@ -250,12 +262,17 @@ export async function fetchChapterPages(
 
 export async function fetchReadingProgress(
   idOrSlug: string,
+  translationId?: string,
   signal?: AbortSignal
 ): Promise<ReadingProgress | null> {
   // If not in Telegram (Guest mode in browser), fetch from localStorage
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
   if (!tgInitData || tgInitData.trim().length === 0) {
     try {
+      if (translationId?.trim()) {
+        const scopedRaw = localStorage.getItem(`onigiri_guest_progress_${idOrSlug.trim()}_${translationId.trim()}`)
+        if (scopedRaw) return JSON.parse(scopedRaw) as ReadingProgress
+      }
       const raw = localStorage.getItem(`onigiri_guest_progress_${idOrSlug.trim()}`)
       if (raw) return JSON.parse(raw) as ReadingProgress
     } catch {
@@ -265,8 +282,13 @@ export async function fetchReadingProgress(
   }
 
   try {
+    const queryParams = new URLSearchParams()
+    if (translationId?.trim()) {
+      queryParams.set('translation_id', translationId.trim())
+    }
+    const qs = queryParams.toString() ? `?${queryParams.toString()}` : ''
     return await request<ReadingProgress | null>(
-      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress`,
+      `/manga/${encodeURIComponent(idOrSlug.trim())}/progress${qs}`,
       { signal }
     )
   } catch (err) {
@@ -304,6 +326,7 @@ export async function saveReadingProgress(
   idOrSlug: string,
   update: {
     chapter_id: number
+    translation_id?: string | null
     chapter_number?: number | null
     chapter_title?: string | null
     page_number: number
@@ -326,6 +349,7 @@ export async function saveReadingProgress(
     const localRecord: ReadingProgress = {
       manga_id: targetMangaId,
       chapter_id: update.chapter_id,
+      translation_id: update.translation_id ?? null,
       chapter_number: update.chapter_number ?? null,
       chapter_title: update.chapter_title ?? null,
       page_number: update.page_number,
@@ -334,6 +358,12 @@ export async function saveReadingProgress(
     }
     try {
       localStorage.setItem(`onigiri_guest_progress_${cleanIdOrSlug}`, JSON.stringify(localRecord))
+      if (update.translation_id?.trim()) {
+        localStorage.setItem(
+          `onigiri_guest_progress_${cleanIdOrSlug}_${update.translation_id.trim()}`,
+          JSON.stringify(localRecord)
+        )
+      }
     } catch {
       // Ignore
     }
@@ -352,6 +382,7 @@ export async function saveReadingProgress(
         cover_url: update.cover_url ?? (existingIdx >= 0 ? history[existingIdx].cover_url : null),
         manga_status: update.manga_status ?? (existingIdx >= 0 ? history[existingIdx].manga_status : 'unknown'),
         chapter_id: update.chapter_id,
+        translation_id: update.translation_id ?? null,
         chapter_number: update.chapter_number ?? null,
         chapter_title: update.chapter_title ?? null,
         page_number: update.page_number,
@@ -380,6 +411,7 @@ export async function saveReadingProgress(
           chapter_id: update.chapter_id,
           page_number: update.page_number,
           total_pages: update.total_pages,
+          translation_id: update.translation_id,
         }),
       }
     )

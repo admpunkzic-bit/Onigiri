@@ -31,6 +31,7 @@ from schemas.manga import (
     GenreRead,
     MangaDetailRead,
     MangaListRead,
+    TranslationVariantRead,
 )
 
 logger = logging.getLogger(__name__)
@@ -621,94 +622,339 @@ class CatalogService:
         )
         return cursor.fetchone()
 
-    def _load_manga_chapters(self, manga_id: int, order: str = "asc", enable_mangadex: bool = True) -> List[ChapterRead]:
+    def get_translation_variants(
+        self, manga_id: int, enable_mangadex: bool = True
+    ) -> Tuple[List[TranslationVariantRead], Optional[str]]:
         """
-        Load chapters for manga with ordering by chapter number.
-        Deduplicates identical chapter releases in favor of Manga-Chan (Primary),
-        while strictly preserving distinct alternative translations (different scanlation groups).
-        Does NOT merge ambiguous chapters that differ by title, volume, or translation group.
-        Excludes MangaDex chapters if enable_mangadex is False.
+        Group all Russian chapters for a manga by source and translation team (scanlation group).
+        Calculates:
+        - Total chapters count (deduplicated within variant)
+        - Volumes count
+        - Min and Max chapter number
+        - Gaps analysis (missing chapters)
+        - Page availability / working status
+        Determines the default translation according to PO rules:
+        - Max working chapters
+        - Sequence completeness (penalizes massive gaps)
+        - ReManga preferred on tie
         """
         cursor = self.conn.cursor()
-        order_dir = "ASC" if order.lower() == "asc" else "DESC"
         cursor.execute(
-            f"""
-            SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number,
-                   c.volume_number, c.title, c.language, c.scanlation_group, c.published_at,
-                   c.created_at, c.updated_at, ms.source_name
+            """
+            SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id,
+                   c.chapter_number, c.volume_number, c.title, c.language, c.scanlation_group,
+                   c.published_at, ms.source_name
             FROM chapters c
-            LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+            JOIN manga_sources ms ON ms.id = c.manga_source_id
             WHERE c.manga_id = ? AND c.language = 'ru'
-            ORDER BY c.chapter_number {order_dir}, c.id {order_dir}
             """,
             (manga_id,),
         )
         raw_rows = cursor.fetchall()
+        if not raw_rows:
+            return [], None
 
-        # Multi-source deduplication with safe release matching:
-        primary_rows: List[sqlite3.Row] = []
-        reserve_rows: List[sqlite3.Row] = []
+        # Filter active vs reserve sources
+        # Active: remanga, mangalib
+        # Fallback/tertiary: mangadex (if enabled)
+        # Inactive: mangachan
+        has_active = any(r["source_name"] in ("remanga", "mangalib") for r in raw_rows)
+        if has_active:
+            valid_rows = [r for r in raw_rows if r["source_name"] in ("remanga", "mangalib")]
+        else:
+            valid_rows = [
+                r for r in raw_rows
+                if r["source_name"] in ("remanga", "mangalib", "mangachan")
+                or (r["source_name"] == "mangadex" and enable_mangadex)
+            ]
 
-        for r in raw_rows:
-            s_name = r["source_name"]
-            if s_name in ("remanga", "mangachan"):
-                primary_rows.append(r)
-            elif s_name == "mangalib":
-                reserve_rows.append(r)
-            elif s_name == "mangadex":
-                if enable_mangadex:
-                    reserve_rows.append(r)
+        # Group rows by (source_name, normalized_team)
+        groups: Dict[str, Dict[str, Any]] = {}
+        for r in valid_rows:
+            src = r["source_name"]
+            team_raw = r["scanlation_group"]
+            is_unknown = (
+                not team_raw
+                or team_raw.strip().lower() in ("", "unknown", "неизвестный", "неизвестно", "none")
+            )
+            clean_team = "unknown" if is_unknown else team_raw.strip()
+            variant_id = f"{src}:{clean_team}"
+
+            if variant_id not in groups:
+                groups[variant_id] = {
+                    "source_name": src,
+                    "scanlation_group": None if is_unknown else clean_team,
+                    "chapters": [],
+                }
+            groups[variant_id]["chapters"].append(r)
+
+        variants: List[TranslationVariantRead] = []
+        for v_id, g in groups.items():
+            chs = g["chapters"]
+            # Deduplicate chapters by (volume_number, chapter_number) within the variant
+            seen: Dict[Tuple[Optional[int], Optional[float]], sqlite3.Row] = {}
+            for c in chs:
+                v_num = c["volume_number"]
+                c_num = c["chapter_number"]
+                k = (v_num, c_num)
+                if k not in seen:
+                    seen[k] = c
+                else:
+                    existing = seen[k]
+                    if c["source_chapter_id"] and not existing["source_chapter_id"]:
+                        seen[k] = c
+                    elif c["id"] > existing["id"]:
+                        seen[k] = c
+
+            deduped_rows = list(seen.values())
+
+            # Sort chapters within variant
+            has_vols = any(c["volume_number"] is not None for c in deduped_rows)
+            def v_sort_key(c):
+                num = c["chapter_number"] if c["chapter_number"] is not None else 0.0
+                if not has_vols:
+                    return (0, num, c["id"])
+                if c["volume_number"] is not None:
+                    return (c["volume_number"], num, c["id"])
+                return (0 if num <= 0.0 else 999999, num, c["id"])
+
+            deduped_rows.sort(key=v_sort_key)
+
+            ch_nums = [c["chapter_number"] for c in deduped_rows if c["chapter_number"] is not None]
+            min_ch = min(ch_nums) if ch_nums else None
+            max_ch = max(ch_nums) if ch_nums else None
+            vols = set(c["volume_number"] for c in deduped_rows if c["volume_number"] is not None)
+
+            # Analyze sequence gaps
+            gaps_count = 0
+            sorted_distinct = sorted(list(set(ch_nums)))
+            for i in range(len(sorted_distinct) - 1):
+                diff = sorted_distinct[i+1] - sorted_distinct[i]
+                if diff > 2.0:
+                    gaps_count += int(diff - 1)
+            has_gaps = gaps_count > 0
+
+            # Labels and display
+            src_name = g["source_name"]
+            src_label = "ReManga" if src_name == "remanga" else "MangaLib" if src_name == "mangalib" else src_name.title()
+            if g["scanlation_group"]:
+                translator_name = g["scanlation_group"]
+                display_name = f"{translator_name} ({src_label})"
             else:
-                reserve_rows.append(r)
+                translator_name = "Переводчик неизвестен"
+                display_name = f"Неизвестный переводчик ({src_label})"
 
-        # Helper to check if a reserve row is an identical release of a primary row
-        def is_identical_release(prim: sqlite3.Row, resv: sqlite3.Row) -> bool:
-            # 1. Chapter number must match
-            if prim["chapter_number"] != resv["chapter_number"]:
-                return False
+            count = len(deduped_rows)
+            is_working = count > 0 and any(c["source_chapter_id"] for c in deduped_rows)
 
-            # 2. Volume number must match (different volumes are NEVER identical releases)
-            if prim["volume_number"] != resv["volume_number"]:
-                return False
+            variants.append(
+                TranslationVariantRead(
+                    id=v_id,
+                    source_name=src_name,
+                    scanlation_group=g["scanlation_group"],
+                    translator_name=translator_name,
+                    display_name=display_name,
+                    chapters_count=count,
+                    volumes_count=len(vols),
+                    min_chapter=min_ch,
+                    max_chapter=max_ch,
+                    has_gaps=has_gaps,
+                    gaps_count=gaps_count,
+                    available_pages_count=0,
+                    is_working=is_working,
+                    is_default=False,
+                )
+            )
 
-            # 3. Translation group check
-            g_prim = (prim["scanlation_group"] or "").strip().lower()
-            g_resv = (resv["scanlation_group"] or "").strip().lower()
-            if g_prim and g_resv:
-                if g_prim != g_resv:
-                    # Distinct translation groups -> alternative translations! Keep both.
+        if not variants:
+            return [], None
+
+        # Scoring function:
+        # 1. More chapters
+        # 2. Sequence completeness (penalize massive gaps)
+        # 3. Prefer ReManga on tie
+        def score_variant(v: TranslationVariantRead) -> Tuple[float, int, int]:
+            if not v.is_working or v.chapters_count == 0:
+                return (-1.0, 0, 0)
+            penalty = min(v.gaps_count * 1.5, v.chapters_count * 0.8)
+            effective = v.chapters_count - penalty
+            remanga_bonus = 1 if v.source_name == "remanga" else 0
+            return (effective, remanga_bonus, v.chapters_count)
+
+        variants.sort(key=score_variant, reverse=True)
+        default_variant_id = variants[0].id
+        variants[0].is_default = True
+
+        return variants, default_variant_id
+
+    def _load_manga_chapters(
+        self,
+        manga_id: int,
+        order: str = "asc",
+        translation_id: Optional[str] = None,
+        enable_mangadex: bool = True,
+    ) -> List[ChapterRead]:
+        """
+        Load chapters for manga with ordering by volume then chapter number.
+        If translation_id == "all", loads all distinct chapters across sources and translations.
+        Otherwise scoped to the selected translation variant, completely eliminating cross-translation duplicates.
+        If no translation_id is specified, selects the default highest-quality translation variant.
+        """
+        if translation_id == "all":
+            cursor = self.conn.cursor()
+            order_dir = "ASC" if order.lower() == "asc" else "DESC"
+            cursor.execute(
+                f"""
+                SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number,
+                       c.volume_number, c.title, c.language, c.scanlation_group, c.published_at,
+                       c.created_at, c.updated_at, ms.source_name
+                FROM chapters c
+                LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? AND c.language = 'ru'
+                ORDER BY c.chapter_number {order_dir}, c.id {order_dir}
+                """,
+                (manga_id,),
+            )
+            raw_rows = cursor.fetchall()
+
+            # Multi-source deduplication with safe release matching
+            primary_rows: List[sqlite3.Row] = []
+            reserve_rows: List[sqlite3.Row] = []
+
+            for r in raw_rows:
+                s_name = r["source_name"]
+                if s_name in ("remanga", "mangachan"):
+                    primary_rows.append(r)
+                elif s_name == "mangalib":
+                    reserve_rows.append(r)
+                elif s_name == "mangadex":
+                    if enable_mangadex:
+                        reserve_rows.append(r)
+                else:
+                    reserve_rows.append(r)
+
+            def is_identical_release(prim: sqlite3.Row, resv: sqlite3.Row) -> bool:
+                if prim["chapter_number"] != resv["chapter_number"]:
                     return False
-
-            # 4. Title comparison
-            t_prim = normalize_title(prim["title"])
-            t_resv = normalize_title(resv["title"])
-            if t_prim and t_resv:
-                # If titles diverge significantly, don't auto-merge (e.g. extra vs main)
-                if t_prim != t_resv:
+                if prim["volume_number"] != resv["volume_number"]:
                     return False
-
-            # 5. Specials / zero-numbered chapters require matching titles
-            ch_num = prim["chapter_number"] if prim["chapter_number"] is not None else 0.0
-            if ch_num == 0.0:
-                if t_prim != t_resv:
+                g_prim = (prim["scanlation_group"] or "").strip().lower()
+                g_resv = (resv["scanlation_group"] or "").strip().lower()
+                if g_prim and g_resv and g_prim != g_resv:
                     return False
+                t_prim = normalize_title(prim["title"])
+                t_resv = normalize_title(resv["title"])
+                if t_prim and t_resv and t_prim != t_resv:
+                    return False
+                ch_num = prim["chapter_number"] if prim["chapter_number"] is not None else 0.0
+                if ch_num == 0.0 and t_prim != t_resv:
+                    return False
+                return True
 
-            return True
+            selected_rows: List[sqlite3.Row] = list(primary_rows)
+            for resv in reserve_rows:
+                is_dup = False
+                for prim in primary_rows:
+                    if is_identical_release(prim, resv):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    selected_rows.append(resv)
 
-        # All primary rows are accepted
-        selected_rows: List[sqlite3.Row] = list(primary_rows)
+            chapters = [
+                ChapterRead(
+                    id=c["id"],
+                    manga_id=c["manga_id"],
+                    manga_source_id=c["manga_source_id"],
+                    source_chapter_id=c["source_chapter_id"],
+                    canonical_chapter_id=c["canonical_chapter_id"],
+                    chapter_number=c["chapter_number"],
+                    volume_number=c["volume_number"],
+                    title=c["title"],
+                    language=c["language"] or "ru",
+                    scanlation_group=c["scanlation_group"],
+                    published_at=c["published_at"],
+                    created_at=c["created_at"],
+                    updated_at=c["updated_at"],
+                )
+                for c in selected_rows
+            ]
 
-        # For each reserve row, include it unless it is an identical release of an already accepted row
-        for resv in reserve_rows:
-            is_dup = False
-            for prim in primary_rows:
-                if is_identical_release(prim, resv):
-                    is_dup = True
-                    break
-            if not is_dup:
-                selected_rows.append(resv)
+            has_volumes = any(c.volume_number is not None for c in chapters)
+            def get_chapter_sort_key_all(c: ChapterRead):
+                num = c.chapter_number if c.chapter_number is not None else 0.0
+                if not has_volumes:
+                    return (0, num, c.id)
+                if c.volume_number is not None:
+                    return (c.volume_number, num, c.id)
+                if num <= 0.0:
+                    return (0, num, c.id)
+                return (999999, num, c.id)
 
-        # Convert to ChapterRead and sort
+            rev = (order.lower() == "desc")
+            chapters.sort(key=get_chapter_sort_key_all, reverse=rev)
+            return chapters
+
+        variants, default_id = self.get_translation_variants(manga_id, enable_mangadex=enable_mangadex)
+        if not variants:
+            return []
+
+        selected_id = translation_id if any(v.id == translation_id for v in variants) else default_id
+        selected_variant = next((v for v in variants if v.id == selected_id), variants[0])
+
+        target_source = selected_variant.source_name
+        target_group = selected_variant.scanlation_group
+
+        cursor = self.conn.cursor()
+        if target_group is None:
+            cursor.execute(
+                """
+                SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id,
+                       c.chapter_number, c.volume_number, c.title, c.language, c.scanlation_group,
+                       c.published_at, c.created_at, c.updated_at, ms.source_name
+                FROM chapters c
+                JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? AND ms.source_name = ? AND c.language = 'ru'
+                  AND (c.scanlation_group IS NULL OR LOWER(TRIM(c.scanlation_group)) IN ('', 'unknown', 'неизвестный', 'неизвестно', 'none'))
+                ORDER BY c.id ASC
+                """,
+                (manga_id, target_source),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT c.id, c.manga_id, c.manga_source_id, c.source_chapter_id, c.canonical_chapter_id,
+                       c.chapter_number, c.volume_number, c.title, c.language, c.scanlation_group,
+                       c.published_at, c.created_at, c.updated_at, ms.source_name
+                FROM chapters c
+                JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? AND ms.source_name = ? AND c.language = 'ru'
+                  AND LOWER(TRIM(c.scanlation_group)) = LOWER(?)
+                ORDER BY c.id ASC
+                """,
+                (manga_id, target_source, target_group.strip()),
+            )
+
+        raw_rows = cursor.fetchall()
+
+        # Deduplicate within variant by (volume_number, chapter_number)
+        seen: Dict[Tuple[Optional[int], Optional[float]], sqlite3.Row] = {}
+        for c in raw_rows:
+            v_num = c["volume_number"]
+            c_num = c["chapter_number"]
+            k = (v_num, c_num)
+            if k not in seen:
+                seen[k] = c
+            else:
+                existing = seen[k]
+                if c["source_chapter_id"] and not existing["source_chapter_id"]:
+                    seen[k] = c
+                elif c["id"] > existing["id"]:
+                    seen[k] = c
+
+        deduped_rows = list(seen.values())
+
+        # Convert to ChapterRead
         chapters: List[ChapterRead] = [
             ChapterRead(
                 id=c["id"],
@@ -725,7 +971,7 @@ class CatalogService:
                 created_at=c["created_at"],
                 updated_at=c["updated_at"],
             )
-            for c in selected_rows
+            for c in deduped_rows
         ]
 
         # Volume-aware sort: sort by volume first, then chapter number
@@ -737,7 +983,6 @@ class CatalogService:
                 return (0, num, c.id)
             if c.volume_number is not None:
                 return (c.volume_number, num, c.id)
-            # Chapters without volume: prologue/specials <= 0 go before Volume 1
             if num <= 0.0:
                 return (0, num, c.id)
             return (999999, num, c.id)
@@ -758,7 +1003,7 @@ class CatalogService:
         7. Reconciles into canonical_chapters without duplicates while preserving alternative translations.
         """
         if not self.registry:
-            return self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
+            return self._load_manga_chapters(manga_id, translation_id="all", enable_mangadex=enable_mangadex)
 
         cursor = self.conn.cursor()
 
@@ -1107,19 +1352,20 @@ class CatalogService:
         )
         self.conn.commit()
 
-        return self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
+        return self._load_manga_chapters(manga_id, translation_id="all", enable_mangadex=enable_mangadex)
 
     async def get_manga_by_id_or_slug(
         self,
         id_or_slug: str,
         auto_sync_chapters: bool = True,
+        translation_id: Optional[str] = None,
         enable_mangadex: bool = True,
     ) -> Optional[MangaDetailRead]:
         """
         Retrieve manga details by internal Onigiri ID, unique slug, or external provider UUID.
         Automatically provisions manga from external provider if accessed by valid provider UUID.
         Automatically synchronizes chapters if none are currently stored.
-        Increments view count and populates authors, genres, and chapters.
+        Increments view count and populates authors, genres, chapters, and translation variants.
         External provider details and source names are omitted from public response.
         """
         cursor = self.conn.cursor()
@@ -1199,9 +1445,15 @@ class CatalogService:
         chapters_count = cursor.fetchone()[0]
 
         if chapters_count == 0 and auto_sync_chapters and self.registry:
-            chapters = await self.sync_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
-        else:
-            chapters = self._load_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
+            await self.sync_manga_chapters(manga_id, enable_mangadex=enable_mangadex)
+
+        # Get translation variants and determine selected translation
+        variants, default_id = self.get_translation_variants(manga_id, enable_mangadex=enable_mangadex)
+        selected_id = translation_id if any(v.id == translation_id for v in variants) else default_id
+
+        chapters = self._load_manga_chapters(
+            manga_id, order="asc", translation_id=selected_id, enable_mangadex=enable_mangadex
+        )
 
         current_cover = row["cover_url"]
         if not current_cover:
@@ -1238,27 +1490,25 @@ class CatalogService:
             authors=authors,
             sources=[],  # External provider sources are not exposed to the user
             chapters=chapters,
+            translations=variants,
+            selected_translation_id=selected_id,
         )
 
     async def get_chapters_for_manga(
         self,
         id_or_slug: str,
         order: str = "asc",
+        translation_id: Optional[str] = None,
         enable_mangadex: bool = True,
     ) -> Optional[List[ChapterRead]]:
-        """Retrieve chapter list for a manga by ID, slug, or external UUID with specified ordering."""
+        """Retrieve chapter list for a manga by ID, slug, or external UUID with specified ordering and translation variant."""
         row = self._find_manga_row(id_or_slug)
         if not row:
             return None
         manga_id = row["id"]
-        return self._load_manga_chapters(manga_id, order=order, enable_mangadex=enable_mangadex)
-
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM chapters WHERE manga_id = ?", (manga_id,))
-        if cursor.fetchone()[0] == 0 and self.registry:
-            await self.sync_manga_chapters(manga_id)
-
-        return self._load_manga_chapters(manga_id, order=order)
+        return self._load_manga_chapters(
+            manga_id, order=order, translation_id=translation_id, enable_mangadex=enable_mangadex
+        )
 
     async def add_to_library(self, user_id: str, id_or_slug: str) -> Optional[MangaListRead]:
         """

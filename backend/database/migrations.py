@@ -903,6 +903,57 @@ def _migration_011_volume_aware_canonical_chapters(conn: sqlite3.Connection) -> 
     )
 
 
+def _migration_012_translation_aware_progress(conn: sqlite3.Connection) -> None:
+    """
+    Migration 012 (TASK 017):
+    Make user_reading_progress aware of translation variants (translation_id).
+    Allows tracking separate reading progress across different translation teams/branches
+    without overwriting or losing progress when switching translations.
+    """
+    cursor = conn.cursor()
+
+    # 1. Create user_reading_progress_v12 with translation_id
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_reading_progress_v12 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            chapter_id INTEGER NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+            translation_id TEXT NOT NULL DEFAULT '',
+            page_number INTEGER NOT NULL DEFAULT 1,
+            total_pages INTEGER DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, manga_id, translation_id)
+        )
+        """
+    )
+
+    # 2. Backfill existing progress records with computed translation_id
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO user_reading_progress_v12 (
+            id, user_id, manga_id, chapter_id, translation_id, page_number, total_pages, created_at, updated_at
+        )
+        SELECT p.id, p.user_id, p.manga_id, p.chapter_id,
+               COALESCE(ms.source_name || ':' || COALESCE(NULLIF(TRIM(c.scanlation_group), ''), 'unknown'), ''),
+               p.page_number, p.total_pages, p.created_at, p.updated_at
+        FROM user_reading_progress p
+        LEFT JOIN chapters c ON c.id = p.chapter_id
+        LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
+        """
+    )
+
+    # 3. Swap table
+    cursor.execute("DROP TABLE IF EXISTS user_reading_progress")
+    cursor.execute("ALTER TABLE user_reading_progress_v12 RENAME TO user_reading_progress")
+
+    # 4. Recreate auxiliary indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reading_progress_user_manga ON user_reading_progress(user_id, manga_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reading_progress_updated ON user_reading_progress(user_id, updated_at)")
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -916,6 +967,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (9, "009_catalog_indexes", _migration_009_catalog_indexes),
     (10, "010_deduplicate_manga_and_backfill_covers", _migration_010_deduplicate_manga_and_backfill_covers),
     (11, "011_volume_aware_canonical_chapters", _migration_011_volume_aware_canonical_chapters),
+    (12, "012_translation_aware_progress", _migration_012_translation_aware_progress),
 ]
 
 

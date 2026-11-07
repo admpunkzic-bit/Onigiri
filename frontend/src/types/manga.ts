@@ -30,6 +30,23 @@ export interface MangaItem {
   authors: AuthorRead[]
 }
 
+export interface TranslationVariant {
+  id: string
+  source_name: string
+  scanlation_group?: string | null
+  translator_name: string
+  display_name: string
+  chapters_count: number
+  volumes_count: number
+  min_chapter?: number | null
+  max_chapter?: number | null
+  has_gaps: boolean
+  gaps_count: number
+  available_pages_count: number
+  is_working: boolean
+  is_default: boolean
+}
+
 export interface ChapterItem {
   id: number
   manga_id: number
@@ -46,6 +63,8 @@ export interface MangaDetail extends MangaItem {
   description?: string | null
   banner_url?: string | null
   chapters: ChapterItem[]
+  translations?: TranslationVariant[]
+  selected_translation_id?: string | null
 }
 
 export interface ChapterReaderPageItem {
@@ -63,6 +82,7 @@ export interface ChapterReaderDetail {
   volume_number?: number | null
   title?: string | null
   scanlation_group?: string | null
+  translation_id?: string | null
   total_pages: number
   pages: ChapterReaderPageItem[]
   prev_chapter_id?: number | null
@@ -72,6 +92,7 @@ export interface ChapterReaderDetail {
 export interface ReadingProgress {
   manga_id: number
   chapter_id: number
+  translation_id?: string | null
   chapter_number?: number | null
   chapter_title?: string | null
   page_number: number
@@ -86,6 +107,8 @@ export interface ReadingHistoryItem {
   cover_url?: string | null
   manga_status?: string | null
   chapter_id: number
+  translation_id?: string | null
+  scanlation_group?: string | null
   chapter_number?: number | null
   volume_number?: number | null
   chapter_title?: string | null

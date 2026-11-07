@@ -390,17 +390,52 @@ class ReaderService:
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID not configured")
 
-        # Load all Russian chapters for this manga to compute adjacent chapter navigation (volume-aware)
-        cursor.execute(
-            """
-            SELECT id, chapter_number, volume_number
-            FROM chapters
-            WHERE manga_id = ? AND language = 'ru'
-            """,
-            (manga_id,),
-        )
+        def _normalize_group(g: Optional[str]) -> str:
+            if not g:
+                return "unknown"
+            g_clean = g.strip().lower()
+            return "unknown" if g_clean in ("", "unknown", "неизвестный", "неизвестно", "none") else g_clean
+
+        current_source_name = ch_row["source_name"] or "mangadex"
+        current_group = ch_row["scanlation_group"]
+        is_unknown_grp = _normalize_group(current_group) == "unknown"
+        current_clean_team = "unknown" if is_unknown_grp else current_group.strip()
+        current_translation_id = f"{current_source_name}:{current_clean_team}"
+
+        # Load Russian chapters for this manga scoped strictly to the current translation variant
+        if is_unknown_grp:
+            cursor.execute(
+                """
+                SELECT c.id, c.chapter_number, c.volume_number
+                FROM chapters c
+                JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? AND ms.source_name = ? AND c.language = 'ru'
+                  AND (c.scanlation_group IS NULL OR LOWER(TRIM(c.scanlation_group)) IN ('', 'unknown', 'неизвестный', 'неизвестно', 'none'))
+                ORDER BY c.id ASC
+                """,
+                (manga_id, current_source_name),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT c.id, c.chapter_number, c.volume_number
+                FROM chapters c
+                JOIN manga_sources ms ON ms.id = c.manga_source_id
+                WHERE c.manga_id = ? AND ms.source_name = ? AND c.language = 'ru'
+                  AND LOWER(TRIM(c.scanlation_group)) = LOWER(?)
+                ORDER BY c.id ASC
+                """,
+                (manga_id, current_source_name, current_clean_team),
+            )
         raw_all = cursor.fetchall()
-        has_vols = any(r["volume_number"] is not None for r in raw_all)
+        seen_nav = {}
+        for r in raw_all:
+            k = (r["volume_number"], r["chapter_number"])
+            if k not in seen_nav or r["id"] == chapter_id:
+                seen_nav[k] = r
+        nav_rows = list(seen_nav.values())
+
+        has_vols = any(r["volume_number"] is not None for r in nav_rows)
 
         def get_nav_sort_key(r):
             num = r["chapter_number"] if r["chapter_number"] is not None else 0.0
@@ -412,7 +447,7 @@ class ReaderService:
                 return (0, num, r["id"])
             return (999999, num, r["id"])
 
-        all_chapters = sorted(raw_all, key=get_nav_sort_key)
+        all_chapters = sorted(nav_rows, key=get_nav_sort_key)
 
         prev_chapter_id: Optional[int] = None
         next_chapter_id: Optional[int] = None
@@ -459,7 +494,7 @@ class ReaderService:
         if not athome_res or not athome_res.pages:
             cursor.execute(
                 """
-                SELECT c.id, c.source_chapter_id, ms.source_name
+                SELECT c.id, c.source_chapter_id, ms.source_name, c.scanlation_group
                 FROM chapters c
                 LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
                 WHERE c.manga_id = ? 
@@ -487,7 +522,13 @@ class ReaderService:
                     ch_row["volume_number"],
                 ),
             )
-            candidates = list(cursor.fetchall())
+            raw_candidates = list(cursor.fetchall())
+            # Strictly require matching translation team for fallback (TASK 017 requirement)
+            primary_group_norm = _normalize_group(ch_row["scanlation_group"])
+            candidates = [
+                c for c in raw_candidates
+                if _normalize_group(c["scanlation_group"]) == primary_group_norm
+            ]
             # Active priority: remanga -> mangalib -> others
             provider_weights = {"remanga": 0, "mangalib": 1, "mangadex": 2, "mangachan": 3}
             candidates.sort(key=lambda c: provider_weights.get(c["source_name"], 99))
@@ -551,6 +592,7 @@ class ReaderService:
             volume_number=ch_row["volume_number"],
             title=ch_row["title"],
             scanlation_group=ch_row["scanlation_group"],
+            translation_id=current_translation_id,
             total_pages=len(pages),
             pages=pages,
             prev_chapter_id=prev_chapter_id,
@@ -573,7 +615,7 @@ class ReaderService:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.volume_number, c.language, ms.source_name
+            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.volume_number, c.language, c.scanlation_group, ms.source_name
             FROM chapters c
             LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
             WHERE c.id = ?
@@ -595,7 +637,7 @@ class ReaderService:
         # Find all fallback candidate chapters in case primary source fails
         cursor.execute(
             """
-            SELECT c.id, c.source_chapter_id, ms.source_name
+            SELECT c.id, c.source_chapter_id, ms.source_name, c.scanlation_group
             FROM chapters c
             LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
             WHERE c.manga_id = ?
@@ -625,7 +667,15 @@ class ReaderService:
         )
         alternative_chapters = cursor.fetchall()
 
-        # Build candidate queue: primary first, then alternatives (respecting enable_mangadex)
+        def _normalize_group(g: Optional[str]) -> str:
+            if not g:
+                return "unknown"
+            g_clean = g.strip().lower()
+            return "unknown" if g_clean in ("", "unknown", "неизвестный", "неизвестно", "none") else g_clean
+
+        primary_group_norm = _normalize_group(row["scanlation_group"])
+
+        # Build candidate queue: primary first, then alternatives (respecting enable_mangadex and translation team)
         candidates = []
         if not (provider_id == "mangadex" and not enable_mangadex):
             candidates.append((source_ch_id, provider_id))
@@ -633,6 +683,8 @@ class ReaderService:
         for alt in alternative_chapters:
             alt_prov = alt["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
             if alt_prov == "mangadex" and not enable_mangadex:
+                continue
+            if _normalize_group(alt["scanlation_group"]) != primary_group_norm:
                 continue
             candidates.append((alt["source_chapter_id"], alt_prov))
 
@@ -809,24 +861,41 @@ class ReaderService:
         self,
         user_id: str,
         id_or_slug: str,
+        translation_id: Optional[str] = None,
     ) -> Optional[ReadingProgressRead]:
         """
-        Get saved reading progress for a verified user and manga.
+        Get saved reading progress for a verified user and manga, optionally scoped to a translation variant.
+        If translation_id is omitted, returns the most recently updated progress for this manga.
         """
         cursor = self.conn.cursor()
         clean_id = id_or_slug.strip()
 
-        cursor.execute(
-            """
-            SELECT p.manga_id, p.chapter_id, p.page_number, p.total_pages, p.updated_at,
-                   c.chapter_number, c.title AS chapter_title
-            FROM user_reading_progress p
-            JOIN manga m ON m.id = p.manga_id
-            JOIN chapters c ON c.id = p.chapter_id
-            WHERE p.user_id = ? AND (m.id = ? OR m.slug = ?)
-            """,
-            (user_id, clean_id, clean_id),
-        )
+        if translation_id:
+            cursor.execute(
+                """
+                SELECT p.manga_id, p.chapter_id, p.translation_id, p.page_number, p.total_pages, p.updated_at,
+                       c.chapter_number, c.title AS chapter_title
+                FROM user_reading_progress p
+                JOIN manga m ON m.id = p.manga_id
+                JOIN chapters c ON c.id = p.chapter_id
+                WHERE p.user_id = ? AND (m.id = ? OR m.slug = ?) AND p.translation_id = ?
+                """,
+                (user_id, clean_id, clean_id, translation_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT p.manga_id, p.chapter_id, p.translation_id, p.page_number, p.total_pages, p.updated_at,
+                       c.chapter_number, c.title AS chapter_title
+                FROM user_reading_progress p
+                JOIN manga m ON m.id = p.manga_id
+                JOIN chapters c ON c.id = p.chapter_id
+                WHERE p.user_id = ? AND (m.id = ? OR m.slug = ?)
+                ORDER BY p.updated_at DESC
+                LIMIT 1
+                """,
+                (user_id, clean_id, clean_id),
+            )
         row = cursor.fetchone()
         if not row:
             return None
@@ -834,6 +903,7 @@ class ReaderService:
         return ReadingProgressRead(
             manga_id=row["manga_id"],
             chapter_id=row["chapter_id"],
+            translation_id=row["translation_id"],
             chapter_number=float(row["chapter_number"]) if row["chapter_number"] is not None else None,
             chapter_title=row["chapter_title"],
             page_number=row["page_number"],
@@ -848,9 +918,11 @@ class ReaderService:
         chapter_id: int,
         page_number: int,
         total_pages: Optional[int] = None,
+        translation_id: Optional[str] = None,
     ) -> ReadingProgressRead:
         """
-        Upsert reading progress for a verified user and manga.
+        Upsert reading progress for a verified user and manga, tracked per translation variant.
+        Preserves reading progress across different translation branches.
         """
         cursor = self.conn.cursor()
         clean_id = id_or_slug.strip()
@@ -865,36 +937,50 @@ class ReaderService:
 
         # Validate chapter belongs to manga
         cursor.execute(
-            "SELECT id, chapter_number, title FROM chapters WHERE id = ? AND manga_id = ?",
+            """
+            SELECT c.id, c.chapter_number, c.title, c.scanlation_group, ms.source_name
+            FROM chapters c
+            JOIN manga_sources ms ON ms.id = c.manga_source_id
+            WHERE c.id = ? AND c.manga_id = ?
+            """,
             (chapter_id, manga_id),
         )
         ch_row = cursor.fetchone()
         if not ch_row:
             raise HTTPException(status_code=400, detail="Chapter does not belong to this manga")
 
+        if translation_id:
+            eff_trans_id = translation_id
+        else:
+            src_name = ch_row["source_name"] or "unknown"
+            grp = ch_row["scanlation_group"]
+            is_unk = not grp or grp.strip().lower() in ("", "unknown", "неизвестный", "неизвестно", "none")
+            eff_trans_id = f"{src_name}:{'unknown' if is_unk else grp.strip()}"
+
         cursor.execute(
             """
             INSERT INTO user_reading_progress (
-                user_id, manga_id, chapter_id, page_number, total_pages, updated_at
+                user_id, manga_id, chapter_id, translation_id, page_number, total_pages, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, manga_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, manga_id, translation_id) DO UPDATE SET
                 chapter_id = excluded.chapter_id,
                 page_number = excluded.page_number,
                 total_pages = excluded.total_pages,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (user_id, manga_id, chapter_id, max(1, page_number), total_pages),
+            (user_id, manga_id, chapter_id, eff_trans_id, max(1, page_number), total_pages),
         )
         self.conn.commit()
 
-        # Fetch and return updated progress
-        return self.get_user_progress(user_id, str(manga_id))
+        # Fetch and return updated progress for this translation
+        return self.get_user_progress(user_id, str(manga_id), translation_id=eff_trans_id)
 
     def get_user_history(self, user_id: str) -> List[ReadingHistoryItemRead]:
         """
         Get ordered reading history for a verified Telegram user.
-        Includes manga info, cover, chapter info, page progress, and timestamps.
+        Includes manga info, cover, chapter info, translation info, page progress, and timestamps.
+        Deduplicates by manga, surfacing the most recently read chapter.
         """
         cursor = self.conn.cursor()
         cursor.execute(
@@ -906,6 +992,8 @@ class ReaderService:
                 m.cover_url,
                 m.status AS manga_status,
                 p.chapter_id,
+                p.translation_id,
+                c.scanlation_group,
                 c.chapter_number,
                 c.volume_number,
                 c.title AS chapter_title,
@@ -921,8 +1009,14 @@ class ReaderService:
             (user_id,),
         )
         rows = cursor.fetchall()
+        seen_manga = set()
         items: List[ReadingHistoryItemRead] = []
         for r in rows:
+            m_id = r["manga_id"]
+            if m_id in seen_manga:
+                continue
+            seen_manga.add(m_id)
+
             cover = r["cover_url"]
             if not cover:
                 cursor.execute(
@@ -945,6 +1039,8 @@ class ReaderService:
                     cover_url=cover,
                     manga_status=r["manga_status"] or "unknown",
                     chapter_id=r["chapter_id"],
+                    translation_id=r["translation_id"],
+                    scanlation_group=r["scanlation_group"],
                     chapter_number=float(r["chapter_number"]) if r["chapter_number"] is not None else None,
                     volume_number=r["volume_number"],
                     chapter_title=r["chapter_title"],

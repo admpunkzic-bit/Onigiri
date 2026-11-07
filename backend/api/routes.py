@@ -324,14 +324,17 @@ async def get_manga_cover(
 @router.get("/manga/{id_or_slug}", response_model=MangaDetailRead)
 async def get_manga_detail(
     id_or_slug: str,
+    translation_id: Optional[str] = Query(None, description="Selected translation variant ID"),
     enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
     Get full manga details by Onigiri ID or slug.
-    Returns unified manga card. External sources are sanitized/omitted.
+    Returns unified manga card with translation variants and scoped chapters.
     """
-    manga = await catalog_service.get_manga_by_id_or_slug(id_or_slug, enable_mangadex=enable_mangadex)
+    manga = await catalog_service.get_manga_by_id_or_slug(
+        id_or_slug, translation_id=translation_id, enable_mangadex=enable_mangadex
+    )
     if not manga:
         raise HTTPException(status_code=404, detail="Manga not found")
     return manga
@@ -341,20 +344,43 @@ async def get_manga_detail(
 async def get_manga_chapters_list(
     id_or_slug: str,
     order: str = Query("asc", description="Sort order: 'asc' or 'desc'"),
+    translation_id: Optional[str] = Query(None, description="Selected translation variant ID"),
     enable_mangadex: bool = Depends(get_enable_mangadex),
     catalog_service: CatalogService = Depends(get_catalog_service),
 ):
     """
     Get full Russian chapters list for a manga by ID, slug, or external UUID.
-    Sorted by chapter number. Sources are sanitized and not exposed.
+    Scoped to the chosen translation variant, sorted by volume and chapter number.
     """
     clean_order = order.lower() if order.lower() in ("asc", "desc") else "asc"
     chapters = await catalog_service.get_chapters_for_manga(
-        id_or_slug, order=clean_order, enable_mangadex=enable_mangadex
+        id_or_slug, order=clean_order, translation_id=translation_id, enable_mangadex=enable_mangadex
     )
     if chapters is None:
         raise HTTPException(status_code=404, detail="Manga not found")
     return chapters
+
+
+@router.get("/manga/{id_or_slug}/translations")
+async def get_manga_translations(
+    id_or_slug: str,
+    enable_mangadex: bool = Depends(get_enable_mangadex),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get all available translation variants with metrics and default selection for a manga.
+    """
+    manga = await catalog_service.get_manga_by_id_or_slug(
+        id_or_slug, auto_sync_chapters=False, enable_mangadex=enable_mangadex
+    )
+    if not manga:
+        raise HTTPException(status_code=404, detail="Manga not found")
+    variants, default_id = catalog_service.get_translation_variants(manga.id, enable_mangadex=enable_mangadex)
+    return {
+        "manga_id": manga.id,
+        "default_translation_id": default_id,
+        "translations": variants,
+    }
 
 
 @router.post("/manga/{id_or_slug}/sync")
@@ -427,14 +453,15 @@ async def get_page_image(
 @router.get("/manga/{id_or_slug}/progress", response_model=Optional[ReadingProgressRead])
 async def get_reading_progress(
     id_or_slug: str,
+    translation_id: Optional[str] = Query(None, description="Translation variant ID"),
     user: dict = Depends(require_telegram_user),
     reader_service: ReaderService = Depends(get_reader_service),
 ):
     """
-    Get reading progress for a verified Telegram user on a given manga.
+    Get reading progress for a verified Telegram user on a given manga, optionally for a translation variant.
     Requires cryptographically verified Telegram initData.
     """
-    return reader_service.get_user_progress(str(user["id"]), id_or_slug)
+    return reader_service.get_user_progress(str(user["id"]), id_or_slug, translation_id=translation_id)
 
 
 @router.post("/manga/{id_or_slug}/progress", response_model=ReadingProgressRead)
@@ -454,6 +481,7 @@ async def save_reading_progress(
         chapter_id=progress.chapter_id,
         page_number=progress.page_number,
         total_pages=progress.total_pages,
+        translation_id=progress.translation_id,
     )
 
 
