@@ -262,9 +262,12 @@ export async function fetchChapterPages(
 
 export async function fetchReadingProgress(
   idOrSlug: string,
-  translationId?: string,
-  signal?: AbortSignal
+  translationIdOrSignal?: string | AbortSignal,
+  signalParam?: AbortSignal
 ): Promise<ReadingProgress | null> {
+  const translationId = typeof translationIdOrSignal === 'string' ? translationIdOrSignal : undefined
+  const signal = translationIdOrSignal instanceof AbortSignal ? translationIdOrSignal : signalParam
+
   // If not in Telegram (Guest mode in browser), fetch from localStorage
   const tgInitData = typeof window !== 'undefined' ? window.Telegram?.WebApp?.initData : undefined
   if (!tgInitData || tgInitData.trim().length === 0) {

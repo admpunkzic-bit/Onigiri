@@ -5,7 +5,6 @@ import {
   ArrowUpDown,
   BookOpen,
   Calendar,
-  Check,
   ChevronDown,
   ChevronUp,
   Eye,
@@ -26,6 +25,7 @@ import {
 } from '../services/api'
 import type { ChapterItem, MangaDetail, ReadingProgress, TranslationVariant } from '../types/manga'
 import { useLibrary } from '../context/LibraryContext'
+import TranslationSelector from '../components/TranslationSelector'
 
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return ''
@@ -555,115 +555,13 @@ export default function MangaDetailPage() {
 
       {/* Chapters Section */}
       <div className="mt-8 border-t border-white/5 pt-6">
-        {/* Translation Variant Selector (TASK 017) */}
-        {translations.length > 0 && (
-          <div className="mb-6 bg-surface/70 border border-white/5 rounded-2xl p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Users size={15} className="text-accent" />
-                <span className="text-xs font-semibold text-text-primary uppercase tracking-wider">
-                  Перевод:
-                </span>
-              </div>
-              <span className="text-[11px] text-text-secondary">
-                {translations.length}{' '}
-                {translations.length === 1
-                  ? 'вариант'
-                  : translations.length < 5
-                    ? 'варианта'
-                    : 'вариантов'}
-              </span>
-            </div>
-
-            {/* Translation cards */}
-            <div className="space-y-2">
-              {translations.map((t) => {
-                const isSelected = t.id === selectedTranslationId
-                const sourceBadge =
-                  t.source_name === 'remanga'
-                    ? 'ReManga'
-                    : t.source_name === 'mangalib'
-                      ? 'MangaLib'
-                      : t.source_name
-
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => handleSelectTranslation(t.id)}
-                    disabled={isLoadingTranslation}
-                    className={`w-full text-left p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
-                      isSelected
-                        ? 'bg-accent/10 border-accent/60 shadow-sm'
-                        : 'bg-surface/50 border-white/5 hover:border-accent/30 hover:bg-surface'
-                    } ${isLoadingTranslation ? 'opacity-60 cursor-not-allowed' : ''}`}
-                  >
-                    <div className="flex-1 min-w-0 pr-3">
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span
-                          className={`text-xs font-semibold ${
-                            isSelected ? 'text-accent' : 'text-text-primary'
-                          }`}
-                        >
-                          {t.translator_name}
-                        </span>
-                        <span className="text-[10px] text-text-secondary bg-white/5 px-2 py-0.5 rounded-full border border-white/5">
-                          {sourceBadge}
-                        </span>
-                        {t.is_default && (
-                          <span className="text-[9px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20 font-medium">
-                            Основной
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-text-secondary flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                        <span className="font-medium text-text-primary/90">
-                          {t.chapters_count} {pluralizeChapters(t.chapters_count)}
-                        </span>
-                        {t.volumes_count > 0 && (
-                          <>
-                            <span>•</span>
-                            <span>
-                              {t.volumes_count}{' '}
-                              {t.volumes_count === 1
-                                ? 'том'
-                                : t.volumes_count < 5
-                                  ? 'тома'
-                                  : 'томов'}
-                            </span>
-                          </>
-                        )}
-                        {t.min_chapter !== null && t.max_chapter !== null && (
-                          <>
-                            <span>•</span>
-                            <span>
-                              главы {t.min_chapter}–{t.max_chapter}
-                            </span>
-                          </>
-                        )}
-                        {t.has_gaps && (
-                          <span className="text-amber-400/90 text-[10px]">
-                            (есть пропуски)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 flex items-center">
-                      {isSelected ? (
-                        <div className="w-5 h-5 rounded-full bg-accent flex items-center justify-center text-white">
-                          <Check size={12} strokeWidth={3} />
-                        </div>
-                      ) : (
-                        <div className="w-5 h-5 rounded-full border border-white/20" />
-                      )}
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
+        {/* Compact Collapsible Translation Selector (TASK 017.1) */}
+        <TranslationSelector
+          translations={translations}
+          selectedTranslationId={selectedTranslationId}
+          onSelectTranslation={handleSelectTranslation}
+          isLoading={isLoadingTranslation}
+        />
 
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <div className="flex items-center gap-2">
