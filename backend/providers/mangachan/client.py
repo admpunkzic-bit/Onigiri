@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MANGACHAN_BASE_URL = "https://im.manga-chan.me"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Onigiri/0.1.0"
-DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+DEFAULT_TIMEOUT = httpx.Timeout(connect=3.0, read=4.0, write=4.0, pool=3.0)
 
 
 class CircuitBreakerOpenError(ProviderNetworkError):
@@ -40,10 +40,10 @@ class MangaChanHttpClient:
         base_url: str = DEFAULT_MANGACHAN_BASE_URL,
         user_agent: str = DEFAULT_USER_AGENT,
         min_request_interval: float = 0.5,
-        max_retries: int = 3,
-        backoff_factor: float = 1.5,
-        failure_threshold: int = 5,
-        recovery_timeout: float = 30.0,
+        max_retries: int = 2,
+        backoff_factor: float = 0.5,
+        failure_threshold: int = 2,
+        recovery_timeout: float = 20.0,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
         client: Optional[httpx.AsyncClient] = None,
     ):

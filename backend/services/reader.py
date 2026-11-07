@@ -144,6 +144,7 @@ class ReaderService:
         data_saver: bool = False,
         force_refresh: bool = False,
         provider_id: str = "mangadex",
+        chapter_id: Optional[int] = None,
     ) -> ProviderPagesResult:
         """
         Fetch AtHome pages from registered provider with in-memory 10-minute caching
@@ -171,7 +172,9 @@ class ReaderService:
             task = _ATHOME_IN_FLIGHT.get(cache_key)
             if task is None:
                 task = asyncio.create_task(
-                    self._execute_athome_fetch(source_chapter_id, data_saver, cache_key, provider_id)
+                    self._execute_athome_fetch(
+                        source_chapter_id, data_saver, cache_key, provider_id, chapter_id=chapter_id
+                    )
                 )
                 _ATHOME_IN_FLIGHT[cache_key] = task
 
@@ -187,6 +190,7 @@ class ReaderService:
         data_saver: bool,
         cache_key: str,
         provider_id: str = "mangadex",
+        chapter_id: Optional[int] = None,
     ) -> ProviderPagesResult:
         """
         Execute AtHome provider fetch, update cache, and ensure cleanup from in-flight map.
@@ -195,16 +199,27 @@ class ReaderService:
         # Check SQLite chapter_pages first for zero-latency retrieval
         try:
             cur = self.conn.cursor()
-            cur.execute(
-                """
-                SELECT cp.page_number, cp.image_url
-                FROM chapter_pages cp
-                JOIN chapters c ON c.id = cp.chapter_id
-                WHERE c.source_chapter_id = ?
-                ORDER BY cp.page_number ASC
-                """,
-                (source_chapter_id,),
-            )
+            if chapter_id:
+                cur.execute(
+                    """
+                    SELECT cp.page_number, cp.image_url
+                    FROM chapter_pages cp
+                    WHERE cp.chapter_id = ?
+                    ORDER BY cp.page_number ASC
+                    """,
+                    (chapter_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT cp.page_number, cp.image_url
+                    FROM chapter_pages cp
+                    JOIN chapters c ON c.id = cp.chapter_id
+                    WHERE c.source_chapter_id = ?
+                    ORDER BY cp.page_number ASC
+                    """,
+                    (source_chapter_id,),
+                )
             db_pages = cur.fetchall()
             if db_pages:
                 cached_res = ProviderPagesResult(
@@ -226,9 +241,12 @@ class ReaderService:
             logger.debug("chapter_pages initial check: %s", db_err)
 
         try:
-            result = await provider.get_chapter_pages(
-                provider_chapter_id=source_chapter_id,
-                data_saver=data_saver,
+            result = await asyncio.wait_for(
+                provider.get_chapter_pages(
+                    provider_chapter_id=source_chapter_id,
+                    data_saver=data_saver,
+                ),
+                timeout=7.0,
             )
             _ATHOME_CACHE[cache_key] = {
                 "result": result,
@@ -236,13 +254,17 @@ class ReaderService:
             }
             try:
                 cur = self.conn.cursor()
-                cur.execute("SELECT id FROM chapters WHERE source_chapter_id = ?", (source_chapter_id,))
-                ch_row = cur.fetchone()
-                if ch_row:
+                target_ch_id = chapter_id
+                if not target_ch_id:
+                    cur.execute("SELECT id FROM chapters WHERE source_chapter_id = ?", (source_chapter_id,))
+                    ch_row = cur.fetchone()
+                    if ch_row:
+                        target_ch_id = ch_row["id"]
+                if target_ch_id:
                     for p in result.pages:
                         cur.execute(
                             "INSERT OR REPLACE INTO chapter_pages (chapter_id, page_number, image_url) VALUES (?, ?, ?)",
-                            (ch_row["id"], p.page_number, p.image_url),
+                            (target_ch_id, p.page_number, p.image_url),
                         )
                     self.conn.commit()
             except Exception as db_save_err:
@@ -254,16 +276,27 @@ class ReaderService:
         except Exception as exc:
             try:
                 cur = self.conn.cursor()
-                cur.execute(
-                    """
-                    SELECT cp.page_number, cp.image_url
-                    FROM chapter_pages cp
-                    JOIN chapters c ON c.id = cp.chapter_id
-                    WHERE c.source_chapter_id = ?
-                    ORDER BY cp.page_number ASC
-                    """,
-                    (source_chapter_id,),
-                )
+                if chapter_id:
+                    cur.execute(
+                        """
+                        SELECT cp.page_number, cp.image_url
+                        FROM chapter_pages cp
+                        WHERE cp.chapter_id = ?
+                        ORDER BY cp.page_number ASC
+                        """,
+                        (chapter_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT cp.page_number, cp.image_url
+                        FROM chapter_pages cp
+                        JOIN chapters c ON c.id = cp.chapter_id
+                        WHERE c.source_chapter_id = ?
+                        ORDER BY cp.page_number ASC
+                        """,
+                        (source_chapter_id,),
+                    )
                 db_pages = cur.fetchall()
                 if db_pages:
                     logger.info("Serving %d pages for chapter %s from persistent chapter_pages fallback", len(db_pages), source_chapter_id)
@@ -377,11 +410,17 @@ class ReaderService:
         actual_source_ch_id = source_ch_id
 
         can_try_primary = not (provider_id == "mangadex" and not enable_mangadex)
+        primary_failed_network = False
         if can_try_primary:
             try:
-                athome_res = await self.get_athome_pages(
-                    source_ch_id, data_saver=False, provider_id=provider_id
-                )
+                try:
+                    athome_res = await self.get_athome_pages(
+                        source_ch_id, data_saver=False, provider_id=provider_id, chapter_id=chapter_id
+                    )
+                except TypeError:
+                    athome_res = await self.get_athome_pages(
+                        source_ch_id, data_saver=False, provider_id=provider_id
+                    )
                 if not athome_res.pages:
                     raise ValueError("Provider returned 0 pages")
             except Exception as primary_err:
@@ -389,6 +428,7 @@ class ReaderService:
                     "Primary fetch for chapter %d (source %s, %s) failed: %s. Looking for fallback...",
                     chapter_id, source_ch_id, provider_id, primary_err
                 )
+                primary_failed_network = True
 
         if not athome_res or not athome_res.pages:
             cursor.execute(
@@ -414,10 +454,18 @@ class ReaderService:
                 cand_provider = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
                 if cand_provider == "mangadex" and not enable_mangadex:
                     continue
+                # If primary provider already failed due to network/outage, skip other candidates from the SAME provider!
+                if primary_failed_network and cand_provider == provider_id:
+                    continue
                 try:
-                    alt_res = await self.get_athome_pages(
-                        cand_source_id, data_saver=False, provider_id=cand_provider
-                    )
+                    try:
+                        alt_res = await self.get_athome_pages(
+                            cand_source_id, data_saver=False, provider_id=cand_provider, chapter_id=cand["id"]
+                        )
+                    except TypeError:
+                        alt_res = await self.get_athome_pages(
+                            cand_source_id, data_saver=False, provider_id=cand_provider
+                        )
                     if alt_res and alt_res.pages:
                         logger.info(
                             "Transparent fallback: chapter %d -> alternative %d (%s) with %d pages",
@@ -540,9 +588,14 @@ class ReaderService:
                     _PAGE_IMAGE_CACHE.move_to_end(cache_key)
                     return _PAGE_IMAGE_CACHE[cache_key]
             try:
-                athome_res = await self.get_athome_pages(
-                    current_ch_id, data_saver=data_saver, provider_id=current_prov
-                )
+                try:
+                    athome_res = await self.get_athome_pages(
+                        current_ch_id, data_saver=data_saver, provider_id=current_prov, chapter_id=chapter_id
+                    )
+                except TypeError:
+                    athome_res = await self.get_athome_pages(
+                        current_ch_id, data_saver=data_saver, provider_id=current_prov
+                    )
                 if not (1 <= page_number <= len(athome_res.pages)):
                     raise HTTPException(
                         status_code=404,
@@ -567,7 +620,7 @@ class ReaderService:
                     }
                     verify_ssl = True
 
-                async with httpx.AsyncClient(timeout=20.0, verify=verify_ssl, follow_redirects=False) as client:
+                async with httpx.AsyncClient(timeout=10.0, verify=verify_ssl, follow_redirects=False) as client:
                     current_url = target_url
                     max_redirects = 5
                     redirect_count = 0
