@@ -390,17 +390,29 @@ class ReaderService:
         if not source_ch_id:
             raise HTTPException(status_code=404, detail="Source chapter ID not configured")
 
-        # Load all Russian chapters for this manga to compute adjacent chapter navigation
+        # Load all Russian chapters for this manga to compute adjacent chapter navigation (volume-aware)
         cursor.execute(
             """
-            SELECT id, chapter_number
+            SELECT id, chapter_number, volume_number
             FROM chapters
             WHERE manga_id = ? AND language = 'ru'
-            ORDER BY chapter_number ASC, id ASC
             """,
             (manga_id,),
         )
-        all_chapters = cursor.fetchall()
+        raw_all = cursor.fetchall()
+        has_vols = any(r["volume_number"] is not None for r in raw_all)
+
+        def get_nav_sort_key(r):
+            num = r["chapter_number"] if r["chapter_number"] is not None else 0.0
+            if not has_vols:
+                return (0, num, r["id"])
+            if r["volume_number"] is not None:
+                return (r["volume_number"], num, r["id"])
+            if num <= 0.0:
+                return (0, num, r["id"])
+            return (999999, num, r["id"])
+
+        all_chapters = sorted(raw_all, key=get_nav_sort_key)
 
         prev_chapter_id: Optional[int] = None
         next_chapter_id: Optional[int] = None
@@ -454,13 +466,26 @@ class ReaderService:
                   AND c.id != ?
                   AND (
                     (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
-                    OR (c.chapter_number = ?)
+                    OR (
+                        c.chapter_number = ?
+                        AND (
+                            (c.volume_number IS NULL AND ? IS NULL)
+                            OR c.volume_number = ?
+                        )
+                    )
                   )
                   AND c.source_chapter_id IS NOT NULL
                   AND c.language = 'ru'
                 ORDER BY c.id ASC
                 """,
-                (manga_id, chapter_id, ch_row["canonical_chapter_id"], ch_row["chapter_number"]),
+                (
+                    manga_id,
+                    chapter_id,
+                    ch_row["canonical_chapter_id"],
+                    ch_row["chapter_number"],
+                    ch_row["volume_number"],
+                    ch_row["volume_number"],
+                ),
             )
             candidates = list(cursor.fetchall())
             # Active priority: remanga -> mangalib -> others
@@ -548,7 +573,7 @@ class ReaderService:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.language, ms.source_name
+            SELECT c.id, c.manga_id, c.source_chapter_id, c.canonical_chapter_id, c.chapter_number, c.volume_number, c.language, ms.source_name
             FROM chapters c
             LEFT JOIN manga_sources ms ON ms.id = c.manga_source_id
             WHERE c.id = ?
@@ -577,13 +602,26 @@ class ReaderService:
               AND c.id != ?
               AND (
                 (c.canonical_chapter_id IS NOT NULL AND c.canonical_chapter_id = ?)
-                OR (c.chapter_number = ?)
+                OR (
+                    c.chapter_number = ?
+                    AND (
+                        (c.volume_number IS NULL AND ? IS NULL)
+                        OR c.volume_number = ?
+                    )
+                )
               )
               AND c.source_chapter_id IS NOT NULL
               AND c.language = 'ru'
             ORDER BY c.id ASC
             """,
-            (row["manga_id"], chapter_id, row["canonical_chapter_id"], row["chapter_number"]),
+            (
+                row["manga_id"],
+                chapter_id,
+                row["canonical_chapter_id"],
+                row["chapter_number"],
+                row["volume_number"],
+                row["volume_number"],
+            ),
         )
         alternative_chapters = cursor.fetchall()
 

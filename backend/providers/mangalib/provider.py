@@ -229,13 +229,16 @@ class MangaLibProvider(BaseMangaProvider):
             except ValueError:
                 num_val = 0.0
 
-            vol = ch.get("volume", "1")
-            try:
-                vol_val = int(vol)
-            except (ValueError, TypeError):
-                vol_val = 1
+            vol = ch.get("volume")
+            vol_val = None
+            if vol is not None:
+                try:
+                    vol_val = int(vol)
+                except (ValueError, TypeError):
+                    vol_val = None
 
-            cid = f"{provider_manga_id}:{vol_val}:{raw_num}"
+            vol_str = str(vol_val) if vol_val is not None else "novol"
+            cid = f"{provider_manga_id}:{vol_str}:{raw_num}"
 
             branches = ch.get("branches", [])
             scan_group = None
@@ -301,7 +304,9 @@ class MangaLibProvider(BaseMangaProvider):
         else:
             raise ValueError(f"Invalid MangaLib chapter ID format: {provider_chapter_id}")
 
-        params = {"volume": vol, "number": num}
+        params = {"number": num}
+        if vol and vol != "novol":
+            params["volume"] = vol
         data = await self.client.request("GET", f"/api/manga/{slug_url}/chapter", params=params)
         chapter_data = data.get("data", data)
         raw_pages = chapter_data.get("pages", [])

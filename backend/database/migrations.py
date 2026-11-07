@@ -837,6 +837,72 @@ def _migration_010_deduplicate_manga_and_backfill_covers(conn: sqlite3.Connectio
             logger.warning(f"FTS5 re-indexing skipped: {fts_err}")
 
 
+def _migration_011_volume_aware_canonical_chapters(conn: sqlite3.Connection) -> None:
+    """
+    Migration 011: Upgrade canonical_chapters to be volume-aware.
+    Replaces UNIQUE(manga_id, chapter_number) with UNIQUE(manga_id, IFNULL(volume_number, -1), chapter_number).
+    Re-links chapters.canonical_chapter_id ensuring distinct volumes with identical chapter numbers
+    (e.g., Vol 5 Ch 1, Vol 6 Ch 1, Vol 7 Ch 1) have distinct canonical chapters.
+    """
+    cursor = conn.cursor()
+
+    # 1. Create new table without single-column unique constraint
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS canonical_chapters_v11 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            manga_id INTEGER NOT NULL REFERENCES manga(id) ON DELETE CASCADE,
+            chapter_number REAL NOT NULL,
+            volume_number INTEGER,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_chapters_manga_vol_num
+        ON canonical_chapters_v11(manga_id, IFNULL(volume_number, -1), chapter_number)
+        """
+    )
+
+    # 2. Populate canonical_chapters_v11 from existing chapters
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO canonical_chapters_v11 (manga_id, volume_number, chapter_number, title)
+        SELECT manga_id, volume_number, chapter_number, title
+        FROM chapters
+        ORDER BY id ASC
+        """
+    )
+
+    # 3. Swap table
+    cursor.execute("DROP TABLE IF EXISTS canonical_chapters")
+    cursor.execute("ALTER TABLE canonical_chapters_v11 RENAME TO canonical_chapters")
+
+    # 4. Recreate auxiliary indexes
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_canonical_chapters_manga_id ON canonical_chapters(manga_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_canonical_chapters_manga_num ON canonical_chapters(manga_id, chapter_number)")
+
+    # 5. Re-link chapters to their proper volume-aware canonical chapter
+    cursor.execute(
+        """
+        UPDATE chapters
+        SET canonical_chapter_id = (
+            SELECT cc.id
+            FROM canonical_chapters cc
+            WHERE cc.manga_id = chapters.manga_id
+              AND (
+                  (cc.volume_number IS NULL AND chapters.volume_number IS NULL)
+                  OR cc.volume_number = chapters.volume_number
+              )
+              AND cc.chapter_number = chapters.chapter_number
+        )
+        """
+    )
+
+
 # List of ordered migrations: (version, name, runner_function)
 MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (1, "001_initial_catalog_schema", _migration_001_initial_catalog_schema),
@@ -849,6 +915,7 @@ MIGRATIONS: List[Tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (8, "008_canonical_chapters", _migration_008_canonical_chapters),
     (9, "009_catalog_indexes", _migration_009_catalog_indexes),
     (10, "010_deduplicate_manga_and_backfill_covers", _migration_010_deduplicate_manga_and_backfill_covers),
+    (11, "011_volume_aware_canonical_chapters", _migration_011_volume_aware_canonical_chapters),
 ]
 
 

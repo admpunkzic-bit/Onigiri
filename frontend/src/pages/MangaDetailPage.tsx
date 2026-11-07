@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -40,6 +40,44 @@ function formatDate(dateStr?: string | null): string {
   }
 }
 
+function pluralizeChapters(count: number): string {
+  const mod10 = count % 10
+  const mod100 = count % 100
+  if (mod10 === 1 && mod100 !== 11) return 'глава'
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'главы'
+  return 'глав'
+}
+
+interface VolumeGroup {
+  id: string
+  volume: number | null
+  title: string
+  chapters: ChapterItem[]
+}
+
+function groupChaptersByVolume(chapters: ChapterItem[]): VolumeGroup[] {
+  if (chapters.length === 0) return []
+
+  const map = new Map<number | 'none', VolumeGroup>()
+  const orderOfAppearance: (number | 'none')[] = []
+
+  for (const ch of chapters) {
+    const key = ch.volume_number != null ? ch.volume_number : 'none'
+    if (!map.has(key)) {
+      map.set(key, {
+        id: String(key),
+        volume: ch.volume_number ?? null,
+        title: ch.volume_number != null ? `Том ${ch.volume_number}` : 'Без тома',
+        chapters: [],
+      })
+      orderOfAppearance.push(key)
+    }
+    map.get(key)!.chapters.push(ch)
+  }
+
+  return orderOfAppearance.map((k) => map.get(k)!)
+}
+
 function formatChapterNumber(num: number | null | undefined): string | null {
   if (num === null || num === undefined) return null
   return String(num)
@@ -59,6 +97,16 @@ export default function MangaDetailPage() {
   const [isSyncing, setIsSyncing] = useState(false)
   const [isDescExpanded, setIsDescExpanded] = useState(false)
   const [progress, setProgress] = useState<ReadingProgress | null>(null)
+  const [collapsedVolumes, setCollapsedVolumes] = useState<Record<string, boolean>>({})
+
+  const volumeGroups = useMemo(() => groupChaptersByVolume(chapters), [chapters])
+
+  const toggleVolume = (groupKey: string) => {
+    setCollapsedVolumes((prev) => ({
+      ...prev,
+      [groupKey]: !prev[groupKey],
+    }))
+  }
 
   const statusLabels: Record<string, { label: string; color: string }> = {
     ongoing: { label: 'Онгоинг', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' },
@@ -107,14 +155,24 @@ export default function MangaDetailPage() {
       const chs = await fetchMangaChapters(idOrSlug, nextOrder)
       setChapters(chs)
     } catch {
-      // Fallback: client-side sort
-      setChapters((prev) =>
-        [...prev].sort((a, b) => {
-          const numA = a.chapter_number ?? 0
-          const numB = b.chapter_number ?? 0
-          return nextOrder === 'asc' ? numA - numB : numB - numA
+      // Fallback: volume-aware client-side sort
+      setChapters((prev) => {
+        const hasVols = prev.some((c) => c.volume_number != null)
+        const getSortKey = (ch: ChapterItem) => {
+          const num = ch.chapter_number ?? 0
+          if (!hasVols) return [0, num, ch.id]
+          if (ch.volume_number != null) return [ch.volume_number, num, ch.id]
+          if (num <= 0) return [0, num, ch.id]
+          return [999999, num, ch.id]
+        }
+        return [...prev].sort((a, b) => {
+          const [va, na, ia] = getSortKey(a)
+          const [vb, nb, ib] = getSortKey(b)
+          if (va !== vb) return nextOrder === 'asc' ? va - vb : vb - va
+          if (na !== nb) return nextOrder === 'asc' ? na - nb : nb - na
+          return nextOrder === 'asc' ? ia - ib : ib - ia
         })
-      )
+      })
     }
   }
 
@@ -503,70 +561,111 @@ export default function MangaDetailPage() {
                 size={14}
                 className={isSyncing ? 'animate-spin' : ''}
               />
-              {isSyncing ? 'Синхронизация...' : 'Синхронизировать из MangaDex'}
+              {isSyncing ? 'Синхронизация...' : 'Синхронизировать главы'}
             </button>
           </div>
         ) : (
-          <div className="space-y-2">
-            {chapters.map((ch) => {
-              const formattedDate = formatDate(ch.published_at)
-              const formattedNumber = Number.isInteger(ch.chapter_number)
-                ? String(ch.chapter_number)
-                : String(ch.chapter_number)
+          <div className="space-y-4">
+            {volumeGroups.map((group) => {
+              const isCollapsed = Boolean(collapsedVolumes[group.title])
 
               return (
-                <div
-                  key={ch.id}
-                  onClick={() =>
-                    navigate(
-                      `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
-                      { state: { initialPage: 1 } }
-                    )
-                  }
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      navigate(
-                        `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
-                        { state: { initialPage: 1 } }
-                      )
-                    }
-                  }}
-                  className="w-full text-left bg-surface hover:bg-surface/80 active:scale-[0.99] border border-white/5 hover:border-accent/30 rounded-xl p-3.5 transition-all flex items-center justify-between group cursor-pointer"
-                >
-                  <div className="flex-1 min-w-0 pr-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-semibold text-text-primary group-hover:text-accent transition-colors">
-                        Глава {formattedNumber}
+                <div key={group.title} className="space-y-2">
+                  {/* Volume Header */}
+                  <button
+                    type="button"
+                    onClick={() => toggleVolume(group.title)}
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 bg-surface/70 hover:bg-surface border border-white/5 hover:border-accent/30 rounded-xl transition-all cursor-pointer group select-none"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <BookOpen size={14} className="text-accent group-hover:scale-105 transition-transform" />
+                      <span className="text-xs font-semibold text-text-primary">
+                        {group.title}
                       </span>
-                      {ch.volume_number && (
-                        <span className="text-[10px] text-text-secondary bg-white/5 px-1.5 py-0.5 rounded">
-                          Том {ch.volume_number}
-                        </span>
-                      )}
+                      <span className="text-[11px] text-text-secondary/80 bg-white/5 px-2 py-0.5 rounded-full font-medium">
+                        {group.chapters.length} {pluralizeChapters(group.chapters.length)}
+                      </span>
                     </div>
-
-                    <div className="flex items-center gap-2 text-xs text-text-secondary">
-                      {ch.title && (
-                        <span className="truncate max-w-[200px] sm:max-w-md text-text-secondary">
-                          {ch.title}
-                        </span>
-                      )}
-                      {ch.title && ch.scanlation_group && <span>•</span>}
-                      {ch.scanlation_group && (
-                        <span className="truncate max-w-[140px] text-accent/80 font-medium text-[11px]">
-                          {ch.scanlation_group}
-                        </span>
-                      )}
+                    <div className="text-text-secondary group-hover:text-text-primary transition-colors">
+                      {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                     </div>
-                  </div>
+                  </button>
 
-                  {formattedDate && (
-                    <span className="text-[11px] text-text-secondary shrink-0">
-                      {formattedDate}
-                    </span>
+                  {/* Chapters within volume */}
+                  {!isCollapsed && (
+                    <div className="space-y-2 pl-0.5 sm:pl-1">
+                      {group.chapters.map((ch) => {
+                        const formattedDate = formatDate(ch.published_at)
+                        const formattedNumber = String(ch.chapter_number)
+                        const isCurrentRead = progress?.chapter_id === ch.id
+
+                        return (
+                          <div
+                            key={ch.id}
+                            onClick={() =>
+                              navigate(
+                                `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
+                                { state: { initialPage: 1 } }
+                              )
+                            }
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                navigate(
+                                  `/manga/${manga.slug || manga.id}/chapter/${ch.id}`,
+                                  { state: { initialPage: 1 } }
+                                )
+                              }
+                            }}
+                            className={`w-full text-left bg-surface hover:bg-surface/80 active:scale-[0.99] border ${
+                              isCurrentRead ? 'border-accent/60 bg-accent/5' : 'border-white/5'
+                            } hover:border-accent/30 rounded-xl p-3.5 transition-all flex items-center justify-between group cursor-pointer`}
+                          >
+                            <div className="flex-1 min-w-0 pr-3">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`text-xs font-semibold ${
+                                  isCurrentRead ? 'text-accent' : 'text-text-primary'
+                                } group-hover:text-accent transition-colors`}>
+                                  Глава {formattedNumber}
+                                </span>
+                                {ch.volume_number != null && (
+                                  <span className="text-[10px] text-text-secondary bg-white/5 px-1.5 py-0.5 rounded">
+                                    Том {ch.volume_number}
+                                  </span>
+                                )}
+                                {isCurrentRead && (
+                                  <span className="text-[10px] text-accent bg-accent/15 px-1.5 py-0.5 rounded font-medium">
+                                    Читаете сейчас
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2 text-xs text-text-secondary">
+                                {ch.title && (
+                                  <span className="truncate max-w-[200px] sm:max-w-md text-text-secondary">
+                                    {ch.title}
+                                  </span>
+                                )}
+                                {ch.title && ch.scanlation_group && <span>•</span>}
+                                {ch.scanlation_group && (
+                                  <span className="truncate max-w-[140px] text-accent/80 font-medium text-[11px]">
+                                    {ch.scanlation_group}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {formattedDate && (
+                              <span className="text-[11px] text-text-secondary shrink-0">
+                                {formattedDate}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
                   )}
                 </div>
               )

@@ -667,10 +667,9 @@ class CatalogService:
             if prim["chapter_number"] != resv["chapter_number"]:
                 return False
 
-            # 2. Volume number check
-            if prim["volume_number"] is not None and resv["volume_number"] is not None:
-                if prim["volume_number"] != resv["volume_number"]:
-                    return False
+            # 2. Volume number must match (different volumes are NEVER identical releases)
+            if prim["volume_number"] != resv["volume_number"]:
+                return False
 
             # 3. Translation group check
             g_prim = (prim["scanlation_group"] or "").strip().lower()
@@ -729,11 +728,22 @@ class CatalogService:
             for c in selected_rows
         ]
 
+        # Volume-aware sort: sort by volume first, then chapter number
+        has_volumes = any(c.volume_number is not None for c in chapters)
+
+        def get_chapter_sort_key(c: ChapterRead):
+            num = c.chapter_number if c.chapter_number is not None else 0.0
+            if not has_volumes:
+                return (0, num, c.id)
+            if c.volume_number is not None:
+                return (c.volume_number, num, c.id)
+            # Chapters without volume: prologue/specials <= 0 go before Volume 1
+            if num <= 0.0:
+                return (0, num, c.id)
+            return (999999, num, c.id)
+
         rev = (order.lower() == "desc")
-        chapters.sort(
-            key=lambda x: (x.chapter_number if x.chapter_number is not None else 0.0, x.id),
-            reverse=rev,
-        )
+        chapters.sort(key=get_chapter_sort_key, reverse=rev)
         return chapters
 
     async def sync_manga_chapters(self, manga_id: int, enable_mangadex: bool = True) -> List[ChapterRead]:
@@ -1061,11 +1071,11 @@ class CatalogService:
                 page += 1
                 await asyncio.sleep(0.05)
 
-        # Step 4: Reconcile into canonical_chapters
+        # Step 4: Reconcile into canonical_chapters (volume-aware)
         cursor.execute(
             """
-            INSERT OR IGNORE INTO canonical_chapters (manga_id, chapter_number, volume_number, title)
-            SELECT manga_id, chapter_number, volume_number, title
+            INSERT OR IGNORE INTO canonical_chapters (manga_id, volume_number, chapter_number, title)
+            SELECT manga_id, volume_number, chapter_number, title
             FROM chapters
             WHERE manga_id = ?
             ORDER BY id ASC
@@ -1079,9 +1089,19 @@ class CatalogService:
                 SELECT cc.id
                 FROM canonical_chapters cc
                 WHERE cc.manga_id = chapters.manga_id
+                  AND (
+                      (cc.volume_number IS NULL AND chapters.volume_number IS NULL)
+                      OR cc.volume_number = chapters.volume_number
+                  )
                   AND cc.chapter_number = chapters.chapter_number
             )
-            WHERE manga_id = ? AND canonical_chapter_id IS NULL
+            WHERE manga_id = ? AND (
+                canonical_chapter_id IS NULL
+                OR canonical_chapter_id IN (
+                    SELECT cc_bad.id FROM canonical_chapters cc_bad
+                    WHERE (cc_bad.volume_number IS NOT NULL AND chapters.volume_number IS NOT NULL AND cc_bad.volume_number != chapters.volume_number)
+                )
+            )
             """,
             (manga_id,),
         )
