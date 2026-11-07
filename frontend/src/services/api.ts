@@ -22,8 +22,16 @@ export function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
   const clean = url.trim()
   if (!clean) return null
-  if (clean.includes('uploads.mangadex.org') || clean.includes('manga-chan.me')) {
-    return `${API_BASE_URL}/manga/cover/proxy?url=${encodeURIComponent(clean)}&v=014.4`
+  if (
+    clean.includes('uploads.mangadex.org') ||
+    clean.includes('manga-chan.me') ||
+    clean.includes('imglib.info') ||
+    clean.includes('cdnrulib.link') ||
+    clean.includes('cdnlibs.org') ||
+    clean.includes('remanga.org') ||
+    clean.includes('reimg2.org')
+  ) {
+    return `${API_BASE_URL}/manga/cover/proxy?url=${encodeURIComponent(clean)}&v=015.0`
   }
   return clean
 }

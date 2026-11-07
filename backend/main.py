@@ -15,6 +15,8 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from api.routes import router as api_router
 from database.connection import init_db
+from providers.remanga import ReMangaHttpClient, ReMangaProvider
+from providers.mangalib import MangaLibHttpClient, MangaLibProvider
 from providers.mangadex import MangaDexHttpClient, MangaDexProvider
 from providers.mangachan import MangaChanHttpClient, MangaChanProvider
 from providers.registry import ProviderRegistry
@@ -25,8 +27,20 @@ async def lifespan(app: FastAPI):
     """Lifecycle events: initialize database and providers on startup, clean shutdown."""
     init_db()
 
-    # Initialize ProviderRegistry and register default providers
+    # Initialize ProviderRegistry and register active and legacy providers
     registry = ProviderRegistry()
+
+    # 1. Primary source: ReManga
+    remanga_client = ReMangaHttpClient()
+    remanga_provider = ReMangaProvider(client=remanga_client)
+    registry.register(remanga_provider)
+
+    # 2. Reserve source: MangaLib
+    mangalib_client = MangaLibHttpClient()
+    mangalib_provider = MangaLibProvider(client=mangalib_client)
+    registry.register(mangalib_provider)
+
+    # 3. Legacy sources (registered for reading previously saved items without deleting data)
     mangadex_client = MangaDexHttpClient()
     mangadex_provider = MangaDexProvider(client=mangadex_client)
     registry.register(mangadex_provider)

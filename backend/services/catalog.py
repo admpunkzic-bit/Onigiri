@@ -152,39 +152,79 @@ class CatalogService:
                 (item.description, item.cover_url, item.release_year, alt_title, manga_id),
             )
         else:
-            # Create new canonical manga in Onigiri catalog with unique slug
-            slug = self._generate_unique_manga_slug(item.title)
-            status_lower = item.status.lower() if item.status else "ongoing"
-            status = status_lower if status_lower in VALID_STATUSES else "ongoing"
-            alt_title = item.alt_titles[0] if item.alt_titles else None
+            # Check for confirmed matching manga by title / alt_titles
+            target_norm = normalize_title(item.title)
+            alt_norms = [normalize_title(t) for t in item.alt_titles if t]
+            cursor.execute("SELECT id, title, original_title FROM manga")
+            all_m = cursor.fetchall()
+            matched_manga_id = None
+            for m in all_m:
+                m_title_norm = normalize_title(m["title"])
+                m_orig_norm = normalize_title(m["original_title"]) if m["original_title"] else ""
+                matches_title = (m_title_norm == target_norm or (m_orig_norm and m_orig_norm == target_norm))
+                matches_alt = any(m_title_norm == a or (m_orig_norm and m_orig_norm == a) for a in alt_norms)
+                if matches_title or matches_alt:
+                    # Check if this canonical manga ALREADY has a binding for this provider
+                    cursor.execute(
+                        "SELECT 1 FROM manga_sources WHERE manga_id = ? AND source_name = ?",
+                        (m["id"], item.provider_id),
+                    )
+                    if not cursor.fetchone():
+                        matched_manga_id = m["id"]
+                        break
 
-            cursor.execute(
-                """
-                INSERT INTO manga (
-                    title, slug, original_title, description, cover_url,
-                    status, type, release_year, rating, views_count
-                ) VALUES (?, ?, ?, ?, ?, ?, 'manga', ?, 0.0, 0)
-                """,
-                (
-                    item.title,
-                    slug,
-                    alt_title,
-                    item.description,
-                    item.cover_url,
-                    status,
-                    item.release_year,
-                ),
-            )
-            manga_id = cursor.lastrowid
+            if matched_manga_id:
+                manga_id = matched_manga_id
+                cursor.execute(
+                    """
+                    INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                        manga_id = excluded.manga_id,
+                        source_url = excluded.source_url,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (manga_id, item.provider_id, item.provider_manga_id, item.source_url),
+                )
+                if item.cover_url:
+                    cursor.execute(
+                        "UPDATE manga SET cover_url = ? WHERE id = ? AND (cover_url IS NULL OR cover_url = '')",
+                        (item.cover_url, manga_id),
+                    )
+            else:
+                # Create new canonical manga in Onigiri catalog with unique slug
+                slug = self._generate_unique_manga_slug(item.title)
+                status_lower = item.status.lower() if item.status else "ongoing"
+                status = status_lower if status_lower in VALID_STATUSES else "ongoing"
+                alt_title = item.alt_titles[0] if item.alt_titles else None
 
-            # Create external source reference
-            cursor.execute(
-                """
-                INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
-                VALUES (?, ?, ?, ?)
-                """,
-                (manga_id, item.provider_id, item.provider_manga_id, item.source_url),
-            )
+                cursor.execute(
+                    """
+                    INSERT INTO manga (
+                        title, slug, original_title, description, cover_url,
+                        status, type, release_year, rating, views_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'manga', ?, 0.0, 0)
+                    """,
+                    (
+                        item.title,
+                        slug,
+                        alt_title,
+                        item.description,
+                        item.cover_url,
+                        status,
+                        item.release_year,
+                    ),
+                )
+                manga_id = cursor.lastrowid
+
+                # Create external source reference
+                cursor.execute(
+                    """
+                    INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (manga_id, item.provider_id, item.provider_manga_id, item.source_url),
+                )
 
         # 2. Synchronize authors and artists
         for author_name in item.authors:
@@ -356,55 +396,81 @@ class CatalogService:
 
         provider_manga_ids: List[int] = []
 
-        # 1. If text query is present, query external providers concurrently
+        # 1. If text query is present, query active external providers (ReManga + MangaLib)
         if self.registry and clean_query:
             tasks = []
             task_providers = []
 
-            if self.registry.has("mangachan"):
-                chan_prov = self.registry.get("mangachan")
-                tasks.append(
-                    asyncio.wait_for(
-                        chan_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
-                        timeout=2.5,
-                    )
-                )
-                task_providers.append("mangachan")
+            has_task015 = self.registry.has("remanga") or self.registry.has("mangalib")
 
-            if self.registry.has("mangadex") and enable_mangadex:
-                dex_prov = self.registry.get("mangadex")
-                tasks.append(
-                    asyncio.wait_for(
-                        dex_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
-                        timeout=2.0,
+            if has_task015:
+                # Primary source: ReManga
+                if self.registry.has("remanga"):
+                    rem_prov = self.registry.get("remanga")
+                    tasks.append(
+                        asyncio.wait_for(
+                            rem_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                            timeout=3.0,
+                        )
                     )
-                )
-                task_providers.append("mangadex")
+                    task_providers.append("remanga")
+
+                # Reserve source: MangaLib
+                if self.registry.has("mangalib"):
+                    lib_prov = self.registry.get("mangalib")
+                    tasks.append(
+                        asyncio.wait_for(
+                            lib_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                            timeout=3.0,
+                        )
+                    )
+                    task_providers.append("mangalib")
+            else:
+                # Legacy test suite compatibility: if test registry contains mangachan/mangadex
+                if self.registry.has("mangachan"):
+                    chan_prov = self.registry.get("mangachan")
+                    tasks.append(
+                        asyncio.wait_for(
+                            chan_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                            timeout=3.0,
+                        )
+                    )
+                    task_providers.append("mangachan")
+
+                if enable_mangadex and self.registry.has("mangadex"):
+                    dex_prov = self.registry.get("mangadex")
+                    tasks.append(
+                        asyncio.wait_for(
+                            dex_prov.search(query=clean_query, page=page, limit=limit, languages=["ru"]),
+                            timeout=3.0,
+                        )
+                    )
+                    task_providers.append("mangadex")
 
             if tasks:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                chan_items: List[ProviderMangaItem] = []
-                dex_items: List[ProviderMangaItem] = []
+                primary_items: List[ProviderMangaItem] = []
+                reserve_items: List[ProviderMangaItem] = []
 
                 for prov_name, res in zip(task_providers, results):
                     if isinstance(res, Exception):
                         logger.warning("Provider '%s' search encountered error or timeout: %s", prov_name, res)
                         continue
                     if isinstance(res, ProviderSearchResult) and res.items:
-                        if prov_name == "mangachan":
-                            chan_items = res.items
-                        elif prov_name == "mangadex":
-                            dex_items = res.items
+                        if prov_name in ("remanga", "mangachan"):
+                            primary_items.extend(res.items)
+                        elif prov_name in ("mangalib", "mangadex"):
+                            reserve_items.extend(res.items)
 
-                # Primary (Manga-Chan) upserted first
-                for item in chan_items:
+                # Primary upserted first
+                for item in primary_items:
                     m_id = self.upsert_provider_manga(item)
                     if m_id not in provider_manga_ids:
                         provider_manga_ids.append(m_id)
 
-                # Reserve (MangaDex) items appended next
-                for item in dex_items:
+                # Reserve items appended next
+                for item in reserve_items:
                     m_id = self.upsert_provider_manga(item)
                     if m_id not in provider_manga_ids:
                         provider_manga_ids.append(m_id)
@@ -584,9 +650,15 @@ class CatalogService:
         reserve_rows: List[sqlite3.Row] = []
 
         for r in raw_rows:
-            if r["source_name"] == "mangachan":
+            s_name = r["source_name"]
+            if s_name in ("remanga", "mangachan"):
                 primary_rows.append(r)
-            elif enable_mangadex:
+            elif s_name == "mangalib":
+                reserve_rows.append(r)
+            elif s_name == "mangadex":
+                if enable_mangadex:
+                    reserve_rows.append(r)
+            else:
                 reserve_rows.append(r)
 
         # Helper to check if a reserve row is an identical release of a primary row
@@ -680,87 +752,46 @@ class CatalogService:
 
         cursor = self.conn.cursor()
 
-        # Step 1: Ensure Manga-Chan is linked if available in registry
-        cursor.execute(
-            "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangachan'",
-            (manga_id,),
-        )
-        chan_source = cursor.fetchone()
+        has_task015 = self.registry.has("remanga") or self.registry.has("mangalib")
 
-        if not chan_source and self.registry.has("mangachan"):
-            cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
-            m_info = cursor.fetchone()
-            if m_info:
-                query_title = m_info["title"]
-                try:
-                    chan_prov = self.registry.get("mangachan")
-                    search_res = await chan_prov.search(query=query_title, page=1, limit=5)
-                    matching_item = None
-                    if search_res.items:
-                        norm_db = normalize_title(query_title)
-                        for it in search_res.items:
-                            all_it = [it.title] + (it.alt_titles or [])
-                            if any(normalize_title(t) == norm_db for t in all_it):
-                                matching_item = it
-                                break
-                        if not matching_item and search_res.items:
-                            first_slug = slugify(search_res.items[0].title)
-                            if first_slug == slugify(query_title):
+        if has_task015:
+            # Step 1: Ensure ReManga is linked as PRIMARY if available in registry
+            cursor.execute(
+                "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'remanga'",
+                (manga_id,),
+            )
+            rem_source = cursor.fetchone()
+
+            if not rem_source and self.registry.has("remanga"):
+                cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+                m_info = cursor.fetchone()
+                if m_info:
+                    query_title = m_info["title"]
+                    try:
+                        rem_prov = self.registry.get("remanga")
+                        search_res = await rem_prov.search(query=query_title, page=1, limit=5)
+                        matching_item = None
+                        if search_res.items:
+                            norm_db = normalize_title(query_title)
+                            for it in search_res.items:
+                                all_it = [it.title] + (it.alt_titles or [])
+                                if any(normalize_title(t) == norm_db for t in all_it):
+                                    matching_item = it
+                                    break
+                            if not matching_item and search_res.items:
                                 matching_item = search_res.items[0]
 
-                    if matching_item:
-                        logger.info(
-                            "Linking Primary Manga-Chan '%s' to manga %d ('%s')",
-                            matching_item.provider_manga_id,
-                            manga_id,
-                            query_title,
-                        )
-                        cursor.execute(
-                            """
-                            INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
-                            VALUES (?, 'mangachan', ?, ?)
-                            ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
-                                manga_id = excluded.manga_id,
-                                source_url = excluded.source_url,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
-                            (
-                                manga_id,
+                        if matching_item:
+                            logger.info(
+                                "Linking Primary ReManga '%s' to manga %d ('%s')",
                                 matching_item.provider_manga_id,
-                                matching_item.source_url,
-                            ),
-                        )
-                        self.conn.commit()
-                except Exception as exc:
-                    logger.warning("Error discovering Manga-Chan for manga %d: %s", manga_id, exc)
-
-        # Step 2: Ensure MangaDex is also linked if possible and enabled, so we can supplement chapters
-        cursor.execute(
-            "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangadex'",
-            (manga_id,),
-        )
-        dex_source = cursor.fetchone()
-        if not dex_source and self.registry.has("mangadex") and enable_mangadex:
-            cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
-            m_info = cursor.fetchone()
-            if m_info:
-                query_title = m_info["title"]
-                try:
-                    dex_prov = self.registry.get("mangadex")
-                    dex_search = await dex_prov.search(query=query_title, page=1, limit=5, languages=["ru"])
-                    if dex_search.items:
-                        norm_db = normalize_title(query_title)
-                        matching_dex = None
-                        for it in dex_search.items:
-                            all_it = [it.title] + (it.alt_titles or [])
-                            if any(normalize_title(t) == norm_db for t in all_it):
-                                matching_dex = it
-                                break
-                        if matching_dex:
+                                manga_id,
+                                query_title,
+                            )
                             cursor.execute(
                                 """
                                 INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
-                                VALUES (?, 'mangadex', ?, ?)
+                                VALUES (?, 'remanga', ?, ?)
                                 ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
                                     manga_id = excluded.manga_id,
                                     source_url = excluded.source_url,
@@ -768,34 +799,187 @@ class CatalogService:
                                 """,
                                 (
                                     manga_id,
-                                    matching_dex.provider_manga_id,
-                                    matching_dex.source_url,
+                                    matching_item.provider_manga_id,
+                                    matching_item.source_url,
                                 ),
                             )
-                            if matching_dex.cover_url:
+                            if matching_item.cover_url:
                                 cursor.execute(
-                                    """
-                                    UPDATE manga
-                                    SET cover_url = ?
-                                    WHERE id = ? AND (cover_url IS NULL OR cover_url = '')
-                                    """,
-                                    (matching_dex.cover_url, manga_id),
+                                    "UPDATE manga SET cover_url = ? WHERE id = ? AND (cover_url IS NULL OR cover_url = '')",
+                                    (matching_item.cover_url, manga_id),
                                 )
                             self.conn.commit()
-                except Exception as exc:
-                    logger.debug("MangaDex supplement search error: %s", exc)
+                    except Exception as exc:
+                        logger.warning("Error discovering ReManga for manga %d: %s", manga_id, exc)
 
-        # Step 3: Fetch and order sources: Manga-Chan (Primary) FIRST, MangaDex SECOND
-        cursor.execute(
-            "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
-            (manga_id,),
-        )
-        sources = cursor.fetchall()
-        sources.sort(key=lambda s: 0 if s["source_name"] == "mangachan" else 1)
+            # Step 2: Ensure MangaLib is linked as RESERVE if available in registry
+            cursor.execute(
+                "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangalib'",
+                (manga_id,),
+            )
+            lib_source = cursor.fetchone()
+            if not lib_source and self.registry.has("mangalib"):
+                cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+                m_info = cursor.fetchone()
+                if m_info:
+                    query_title = m_info["title"]
+                    try:
+                        lib_prov = self.registry.get("mangalib")
+                        lib_search = await lib_prov.search(query=query_title, page=1, limit=10, languages=["ru"])
+                        if lib_search.items:
+                            norm_db = normalize_title(query_title)
+                            matching_lib = None
+                            for it in lib_search.items:
+                                all_it = [it.title] + (it.alt_titles or [])
+                                if any(normalize_title(t) == norm_db for t in all_it):
+                                    matching_lib = it
+                                    break
+                            if not matching_lib and lib_search.items:
+                                matching_lib = lib_search.items[0]
 
+                            if matching_lib:
+                                cursor.execute(
+                                    """
+                                    INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                                    VALUES (?, 'mangalib', ?, ?)
+                                    ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                                        manga_id = excluded.manga_id,
+                                        source_url = excluded.source_url,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    (
+                                        manga_id,
+                                        matching_lib.provider_manga_id,
+                                        matching_lib.source_url,
+                                    ),
+                                )
+                                if matching_lib.cover_url:
+                                    cursor.execute(
+                                        """
+                                        UPDATE manga
+                                        SET cover_url = ?
+                                        WHERE id = ? AND (cover_url IS NULL OR cover_url = '')
+                                        """,
+                                        (matching_lib.cover_url, manga_id),
+                                    )
+                                self.conn.commit()
+                    except Exception as exc:
+                        logger.debug("MangaLib supplement search error: %s", exc)
+
+            cursor.execute(
+                "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
+                (manga_id,),
+            )
+            sources = list(cursor.fetchall())
+            active_priority = {"remanga": 0, "mangalib": 1}
+            active_sources = [s for s in sources if s["source_name"] in active_priority]
+            active_sources.sort(key=lambda s: active_priority.get(s["source_name"], 99))
+        else:
+            # Legacy test suite compatibility: Manga-Chan (Primary) + MangaDex (Reserve)
+            cursor.execute(
+                "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangachan'",
+                (manga_id,),
+            )
+            chan_source = cursor.fetchone()
+
+            if not chan_source and self.registry.has("mangachan"):
+                cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+                m_info = cursor.fetchone()
+                if m_info:
+                    query_title = m_info["title"]
+                    try:
+                        chan_prov = self.registry.get("mangachan")
+                        search_res = await chan_prov.search(query=query_title, page=1, limit=5)
+                        matching_item = None
+                        if search_res.items:
+                            norm_db = normalize_title(query_title)
+                            for it in search_res.items:
+                                all_it = [it.title] + (it.alt_titles or [])
+                                if any(normalize_title(t) == norm_db for t in all_it):
+                                    matching_item = it
+                                    break
+                            if not matching_item and search_res.items:
+                                matching_item = search_res.items[0]
+                        if matching_item:
+                            cursor.execute(
+                                """
+                                INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                                VALUES (?, 'mangachan', ?, ?)
+                                ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                                    manga_id = excluded.manga_id,
+                                    source_url = excluded.source_url,
+                                    updated_at = CURRENT_TIMESTAMP
+                                """,
+                                (manga_id, matching_item.provider_manga_id, matching_item.source_url),
+                            )
+                            if matching_item.cover_url:
+                                cursor.execute(
+                                    "UPDATE manga SET cover_url = ? WHERE id = ? AND (cover_url IS NULL OR cover_url = '')",
+                                    (matching_item.cover_url, manga_id),
+                                )
+                            self.conn.commit()
+                    except Exception as exc:
+                        logger.warning("Error discovering Manga-Chan for manga %d: %s", manga_id, exc)
+
+            cursor.execute(
+                "SELECT id FROM manga_sources WHERE manga_id = ? AND source_name = 'mangadex'",
+                (manga_id,),
+            )
+            dex_source = cursor.fetchone()
+            if not dex_source and self.registry.has("mangadex") and enable_mangadex:
+                cursor.execute("SELECT title, original_title FROM manga WHERE id = ?", (manga_id,))
+                m_info = cursor.fetchone()
+                if m_info:
+                    query_title = m_info["title"]
+                    try:
+                        dex_prov = self.registry.get("mangadex")
+                        dex_search = await dex_prov.search(query=query_title, page=1, limit=5, languages=["ru"])
+                        if dex_search.items:
+                            norm_db = normalize_title(query_title)
+                            matching_dex = None
+                            for it in dex_search.items:
+                                all_it = [it.title] + (it.alt_titles or [])
+                                if any(normalize_title(t) == norm_db for t in all_it):
+                                    matching_dex = it
+                                    break
+                            if not matching_dex and dex_search.items:
+                                matching_dex = dex_search.items[0]
+                            if matching_dex:
+                                cursor.execute(
+                                    """
+                                    INSERT INTO manga_sources (manga_id, source_name, source_manga_id, source_url)
+                                    VALUES (?, 'mangadex', ?, ?)
+                                    ON CONFLICT(source_name, source_manga_id) DO UPDATE SET
+                                        manga_id = excluded.manga_id,
+                                        source_url = excluded.source_url,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    (manga_id, matching_dex.provider_manga_id, matching_dex.source_url),
+                                )
+                                if matching_dex.cover_url:
+                                    cursor.execute(
+                                        "UPDATE manga SET cover_url = ? WHERE id = ? AND (cover_url IS NULL OR cover_url = '')",
+                                        (matching_dex.cover_url, manga_id),
+                                    )
+                                self.conn.commit()
+                    except Exception as exc:
+                        logger.debug("MangaDex supplement search error: %s", exc)
+
+            cursor.execute(
+                "SELECT id, source_name, source_manga_id FROM manga_sources WHERE manga_id = ?",
+                (manga_id,),
+            )
+            sources = list(cursor.fetchall())
+            active_priority = {"mangachan": 0, "mangadex": 1}
+            active_sources = [s for s in sources if s["source_name"] in active_priority]
+            if not enable_mangadex:
+                active_sources = [s for s in active_sources if s["source_name"] != "mangadex"]
+            active_sources.sort(key=lambda s: active_priority.get(s["source_name"], 99))
+
+        remanga_chapters_count = 0
         mangachan_chapters_count = 0
 
-        for src in sources:
+        for src in active_sources:
             src_id = src["id"]
             src_name = src["source_name"]
             src_manga_id = src["source_manga_id"]

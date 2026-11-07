@@ -266,23 +266,15 @@ export default function SettingsPage() {
           Источники данных
         </h2>
 
-        {/* Резервный источник MangaDex */}
-        <div className="flex items-center justify-between gap-4 py-3.5 px-4 bg-surface rounded-xl border border-white/5">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-text-primary">
-              Резервный источник MangaDex
-            </p>
-            <p className="text-xs text-text-secondary mt-0.5">
-              Использовать MangaDex для поиска недостающих глав и резервной загрузки
-            </p>
+        <div className="py-3.5 px-4 bg-surface rounded-xl border border-white/5 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-text-primary">ReManga</span>
+            <span className="text-[11px] font-semibold text-accent px-2 py-0.5 rounded bg-accent/15">Основной источник</span>
           </div>
-          <Toggle
-            checked={settings.enableMangaDex}
-            onChange={(val) => {
-              updateSettings({ enableMangaDex: val })
-              triggerToast(val ? 'Резервный источник MangaDex включён' : 'Резервный источник MangaDex отключён')
-            }}
-          />
+          <div className="flex items-center justify-between pt-2 border-t border-white/5">
+            <span className="text-sm font-medium text-text-primary">MangaLib</span>
+            <span className="text-[11px] font-semibold text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/15">Резервный источник</span>
+          </div>
         </div>
       </section>
 
@@ -347,7 +339,7 @@ export default function SettingsPage() {
           Платформа: Telegram WebApp & Modern Web
         </p>
         <p className="text-[11px] text-text-secondary/60">
-          Основной источник: Manga-Chan • Резервный: MangaDex
+          Основной источник: ReManga • Резервный: MangaLib
         </p>
       </section>
 

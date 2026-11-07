@@ -34,6 +34,20 @@ ALLOWED_DOMAINS = (
     "uploads.mangadex.org",
     ".manga-chan.me",
     "manga-chan.me",
+    ".remanga.org",
+    "remanga.org",
+    ".reimg2.org",
+    "reimg2.org",
+    ".imglib.info",
+    "imglib.info",
+    ".cdnrulib.link",
+    "cdnrulib.link",
+    ".cdnlibs.org",
+    "cdnlibs.org",
+    ".lib.social",
+    "lib.social",
+    ".mangalib.me",
+    "mangalib.me",
 )
 
 # In-memory AtHome cache: source_chapter_id -> { "result": ProviderPagesResult, "cached_at": float }
@@ -448,10 +462,14 @@ class ReaderService:
                 """,
                 (manga_id, chapter_id, ch_row["canonical_chapter_id"], ch_row["chapter_number"]),
             )
-            candidates = cursor.fetchall()
+            candidates = list(cursor.fetchall())
+            # Active priority: remanga -> mangalib -> others
+            provider_weights = {"remanga": 0, "mangalib": 1, "mangadex": 2, "mangachan": 3}
+            candidates.sort(key=lambda c: provider_weights.get(c["source_name"], 99))
+
             for cand in candidates:
                 cand_source_id = cand["source_chapter_id"]
-                cand_provider = cand["source_name"] or ("mangadex" if provider_id == "mangachan" else "mangachan")
+                cand_provider = cand["source_name"] or ("mangalib" if provider_id == "remanga" else "remanga")
                 if cand_provider == "mangadex" and not enable_mangadex:
                     continue
                 # If primary provider already failed due to network/outage, skip other candidates from the SAME provider!
@@ -485,9 +503,9 @@ class ReaderService:
                 if primary_failed_network:
                     raise HTTPException(
                         status_code=502,
-                        detail="Не удалось загрузить страницы главы: первичный источник недоступен, а в резервном источнике (MangaDex) данная глава отсутствует",
+                        detail="Не удалось загрузить страницы главы: первичный источник недоступен, а в резервном источнике данная глава отсутствует",
                     )
-                raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника")
+                raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника (ReManga, MangaLib)")
 
         enable_param = "" if enable_mangadex else "?enable_mangadex=false"
         pages = [
@@ -613,12 +631,36 @@ class ReaderService:
                 target_url = validate_and_resolve_url_ssrf(raw_target_url)
 
                 is_mangachan_target = (current_prov == "mangachan" or ".manga-chan.me" in target_url)
+                is_remanga_target = (current_prov == "remanga" or "remanga.org" in target_url or "reimg2.org" in target_url)
+                is_mangalib_target = (
+                    current_prov == "mangalib"
+                    or "imglib.info" in target_url
+                    or "cdnrulib.link" in target_url
+                    or "cdnlibs.org" in target_url
+                    or "mangalib.me" in target_url
+                    or "lib.social" in target_url
+                )
+
                 if is_mangachan_target:
                     req_headers = {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Referer": f"https://im.manga-chan.me/online/{current_ch_id}.html",
                     }
                     verify_ssl = False
+                elif is_remanga_target:
+                    req_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": "https://remanga.org/",
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    }
+                    verify_ssl = True
+                elif is_mangalib_target:
+                    req_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": "https://mangalib.me/",
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    }
+                    verify_ssl = True
                 else:
                     req_headers = {
                         "User-Agent": "Onigiri-App/1.0",

@@ -231,6 +231,14 @@ async def get_manga_cover(
 
     is_mangachan = "manga-chan.me" in clean_url
     is_mangadex = "mangadex.org" in clean_url
+    is_remanga = "remanga.org" in clean_url or "reimg2.org" in clean_url
+    is_mangalib = (
+        "imglib.info" in clean_url
+        or "cdnrulib.link" in clean_url
+        or "cdnlibs.org" in clean_url
+        or "mangalib.me" in clean_url
+        or "lib.social" in clean_url
+    )
 
     if is_mangachan:
         req_headers = {
@@ -238,6 +246,22 @@ async def get_manga_cover(
             "Referer": "https://im.manga-chan.me/",
         }
         verify_ssl = False
+        follow_redirects = True
+    elif is_remanga:
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://remanga.org/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        verify_ssl = True
+        follow_redirects = True
+    elif is_mangalib:
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://mangalib.me/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        }
+        verify_ssl = True
         follow_redirects = True
     elif is_mangadex:
         # MangaDex CDN edge requires clean application User-Agent.
