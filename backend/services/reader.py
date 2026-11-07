@@ -482,6 +482,11 @@ class ReaderService:
             if not athome_res or not athome_res.pages:
                 if provider_id == "mangadex" and not enable_mangadex:
                     raise HTTPException(status_code=403, detail="Источник MangaDex отключён в настройках")
+                if primary_failed_network:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Не удалось загрузить страницы главы: первичный источник недоступен, а в резервном источнике (MangaDex) данная глава отсутствует",
+                    )
                 raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника")
 
         enable_param = "" if enable_mangadex else "?enable_mangadex=false"

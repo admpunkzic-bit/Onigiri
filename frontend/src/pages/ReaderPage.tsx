@@ -115,8 +115,8 @@ export default function ReaderPage() {
         }
         if (isMounted) {
           console.error('Failed to load chapter pages:', err)
-          if (err instanceof ApiError && err.statusCode === 403) {
-            setError(err.message || 'Источник MangaDex отключён в настройках')
+          if (err instanceof ApiError) {
+            setError(err.message || 'Не удалось загрузить страницы главы. Проверьте подключение к сети.')
           } else {
             setError('Не удалось загрузить страницы главы. Проверьте подключение к сети.')
           }
