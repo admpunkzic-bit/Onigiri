@@ -29,6 +29,8 @@ from schemas.manga import (
     AuthorRead,
     ChapterRead,
     GenreRead,
+    HomepageCollectionRead,
+    HomepageDataRead,
     MangaDetailRead,
     MangaListRead,
     TranslationVariantRead,
@@ -357,6 +359,335 @@ class CatalogService:
             GenreRead(id=r["id"], name=r["name"], slug=r["slug"])
             for r in cursor.fetchall()
         ]
+
+    # ==============================================================================
+    # Dynamic Homepage Collections & Recommendations (TASK 018)
+    # ==============================================================================
+
+    def get_popular_completed(self, limit: int = 12) -> List[MangaListRead]:
+        """
+        Dynamic collection: Popular Completed (Популярное завершённое).
+        - Works strictly with status 'completed'
+        - Ordered by real popularity score (views, library additions, reading activity, rating)
+        - Strictly requires Russian translation availability
+        - Zero ongoing works included
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.id,
+                   (m.views_count * 1.0 + 
+                    COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                    COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                    m.rating * 2.0) AS pop_score
+            FROM manga m
+            WHERE LOWER(m.status) = 'completed'
+              AND (
+                EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+              )
+            ORDER BY pop_score DESC, m.views_count DESC, m.rating DESC, m.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        manga_ids = [row["id"] for row in cursor.fetchall()]
+        return self._load_manga_list_items(manga_ids)
+
+    def get_popular_ongoing(self, limit: int = 12) -> List[MangaListRead]:
+        """
+        Dynamic collection: Popular Ongoing (Популярные онгоинги).
+        - Works strictly with status 'ongoing'
+        - Ordered by real popularity score
+        - Strictly requires Russian translation availability
+        - Zero completed works included
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.id,
+                   (m.views_count * 1.0 + 
+                    COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                    COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                    m.rating * 2.0) AS pop_score
+            FROM manga m
+            WHERE LOWER(m.status) = 'ongoing'
+              AND (
+                EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+              )
+            ORDER BY pop_score DESC, m.views_count DESC, m.rating DESC, m.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        manga_ids = [row["id"] for row in cursor.fetchall()]
+        return self._load_manga_list_items(manga_ids)
+
+    def get_recently_added(self, limit: int = 12) -> List[MangaListRead]:
+        """
+        Dynamic collection: Recently Added (Недавно добавленные).
+        - Works recently added to Onigiri catalog (m.created_at DESC)
+        - Strictly requires Russian translation availability
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.id
+            FROM manga m
+            WHERE (
+                EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+            )
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        manga_ids = [row["id"] for row in cursor.fetchall()]
+        return self._load_manga_list_items(manga_ids)
+
+    def get_recently_updated(self, limit: int = 12) -> List[MangaListRead]:
+        """
+        Dynamic collection: Recently Updated (Недавно обновлённые).
+        - Works with recent Russian chapters or recent catalog synchronization
+        - Sorted by chapter update timestamp
+        - Strictly requires Russian translation availability
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.id,
+                   MAX(COALESCE(c.updated_at, c.created_at, m.updated_at)) as latest_update
+            FROM manga m
+            LEFT JOIN chapters c ON c.manga_id = m.id AND c.language = 'ru'
+            WHERE (
+                c.id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+            )
+            GROUP BY m.id
+            ORDER BY (CASE WHEN c.id IS NOT NULL THEN 1 ELSE 0 END) DESC, latest_update DESC, m.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        manga_ids = [row["id"] for row in cursor.fetchall()]
+        return self._load_manga_list_items(manga_ids)
+
+    def get_personalized_recommendations(
+        self,
+        user_id: Optional[str] = None,
+        guest_manga_ids: Optional[List[int]] = None,
+        limit: int = 12,
+    ) -> Tuple[List[MangaListRead], bool]:
+        """
+        Dynamic collection: Personalized Recommendations ("Манга в вашем стиле").
+        Based on user's library and reading history genres/tags.
+        Excludes already read / in-library manga.
+        Fallback for new users: trending popular selection across genres.
+        Returns: (items, is_personalized)
+        """
+        cursor = self.conn.cursor()
+        known_ids: Set[int] = set()
+
+        if user_id:
+            cursor.execute("SELECT manga_id FROM user_library WHERE user_id = ?", (user_id,))
+            for r in cursor.fetchall():
+                known_ids.add(r["manga_id"])
+            cursor.execute("SELECT DISTINCT manga_id FROM user_reading_progress WHERE user_id = ?", (user_id,))
+            for r in cursor.fetchall():
+                known_ids.add(r["manga_id"])
+
+        if guest_manga_ids:
+            for gid in guest_manga_ids:
+                if isinstance(gid, int) and gid > 0:
+                    known_ids.add(gid)
+
+        # Fallback for new user with no history/library
+        if not known_ids:
+            cursor.execute(
+                """
+                SELECT m.id,
+                       (m.views_count * 1.0 + 
+                        COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                        COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                        m.rating * 2.0) AS pop_score
+                FROM manga m
+                WHERE (
+                    EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                    OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+                )
+                ORDER BY pop_score DESC, m.views_count DESC, m.rating DESC, m.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            manga_ids = [row["id"] for row in cursor.fetchall()]
+            return self._load_manga_list_items(manga_ids), False
+
+        # User has history/library: compute genre preferences
+        known_list = list(known_ids)
+        known_ph = ",".join("?" for _ in known_list)
+        cursor.execute(
+            f"""
+            SELECT mg.genre_id, COUNT(*) as freq
+            FROM manga_genres mg
+            WHERE mg.manga_id IN ({known_ph})
+            GROUP BY mg.genre_id
+            """,
+            known_list,
+        )
+        genre_weights: Dict[int, int] = {r["genre_id"]: r["freq"] for r in cursor.fetchall()}
+
+        if not genre_weights:
+            # User manga had no associated genres: fallback excluding known
+            cursor.execute(
+                f"""
+                SELECT m.id,
+                       (m.views_count * 1.0 + 
+                        COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                        COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                        m.rating * 2.0) AS pop_score
+                FROM manga m
+                WHERE m.id NOT IN ({known_ph})
+                  AND (
+                    EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                    OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+                  )
+                ORDER BY pop_score DESC, m.views_count DESC, m.rating DESC, m.id DESC
+                LIMIT ?
+                """,
+                known_list + [limit],
+            )
+            manga_ids = [row["id"] for row in cursor.fetchall()]
+            return self._load_manga_list_items(manga_ids), False
+
+        # Find candidates matching preferred genres, strictly excluding known manga
+        genre_ids = list(genre_weights.keys())
+        genre_ph = ",".join("?" for _ in genre_ids)
+        params = genre_ids + known_list
+
+        cursor.execute(
+            f"""
+            SELECT m.id, m.views_count, m.rating,
+                   GROUP_CONCAT(mg.genre_id) as matched_genre_ids,
+                   (m.views_count * 1.0 + 
+                    COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                    COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                    m.rating * 2.0) AS pop_score
+            FROM manga m
+            JOIN manga_genres mg ON mg.manga_id = m.id
+            WHERE mg.genre_id IN ({genre_ph})
+              AND m.id NOT IN ({known_ph})
+              AND (
+                EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+              )
+            GROUP BY m.id
+            """,
+            params,
+        )
+        candidate_rows = cursor.fetchall()
+        scored_candidates: List[Tuple[int, float, int]] = []
+
+        for r in candidate_rows:
+            matched_ids = [int(x) for x in r["matched_genre_ids"].split(",") if x.isdigit()]
+            sim_score = sum(genre_weights.get(gid, 1) for gid in set(matched_ids))
+            composite_score = sim_score * 10.0 + (r["pop_score"] * 0.5)
+            scored_candidates.append((r["id"], composite_score, sim_score))
+
+        scored_candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        recommended_ids = [c[0] for c in scored_candidates[:limit]]
+
+        # If candidates are fewer than limit (e.g. niche genres), supplement with popular
+        if len(recommended_ids) < limit:
+            remaining = limit - len(recommended_ids)
+            exclude_all = list(known_ids.union(recommended_ids))
+            ex_ph = ",".join("?" for _ in exclude_all)
+            cursor.execute(
+                f"""
+                SELECT m.id,
+                       (m.views_count * 1.0 + 
+                        COALESCE((SELECT COUNT(*) FROM user_library ul WHERE ul.manga_id = m.id), 0) * 5.0 + 
+                        COALESCE((SELECT COUNT(DISTINCT urp.user_id) FROM user_reading_progress urp WHERE urp.manga_id = m.id), 0) * 3.0 + 
+                        m.rating * 2.0) AS pop_score
+                FROM manga m
+                WHERE m.id NOT IN ({ex_ph})
+                  AND (
+                    EXISTS (SELECT 1 FROM chapters c WHERE c.manga_id = m.id AND c.language = 'ru')
+                    OR EXISTS (SELECT 1 FROM manga_sources ms WHERE ms.manga_id = m.id AND ms.source_name IN ('remanga', 'mangalib', 'mangachan'))
+                  )
+                ORDER BY pop_score DESC, m.views_count DESC, m.rating DESC, m.id DESC
+                LIMIT ?
+                """,
+                exclude_all + [remaining],
+            )
+            for r in cursor.fetchall():
+                recommended_ids.append(r["id"])
+
+        return self._load_manga_list_items(recommended_ids), True
+
+    def get_homepage_data(
+        self,
+        user_id: Optional[str] = None,
+        guest_manga_ids: Optional[List[int]] = None,
+        limit: int = 12,
+    ) -> HomepageDataRead:
+        """
+        Aggregate all dynamic collections for the Onigiri homepage in a single high-performance query batch.
+        """
+        pop_completed = self.get_popular_completed(limit=limit)
+        pop_ongoing = self.get_popular_ongoing(limit=limit)
+        rec_items, is_personalized = self.get_personalized_recommendations(
+            user_id=user_id, guest_manga_ids=guest_manga_ids, limit=limit
+        )
+        recently_added = self.get_recently_added(limit=limit)
+        recently_updated = self.get_recently_updated(limit=limit)
+
+        for_you_subtitle = (
+            "Подобрано на основе жанров манги из вашей библиотеки и истории чтения"
+            if is_personalized
+            else "Популярные произведения Onigiri. Читайте или сохраняйте мангу, чтобы настроить рекомендации"
+        )
+
+        return HomepageDataRead(
+            continue_reading=[],  # Populated at route level via reader_service if user_id is authenticated
+            for_you=HomepageCollectionRead(
+                id="for_you",
+                title="Манга в вашем стиле",
+                subtitle=for_you_subtitle,
+                see_all_url="/search?sort_by=rating",
+                items=rec_items,
+            ),
+            popular_ongoing=HomepageCollectionRead(
+                id="popular_ongoing",
+                title="Популярные онгоинги",
+                subtitle="Произведения, которые сейчас выходят",
+                see_all_url="/search?status=ongoing&sort_by=popularity",
+                items=pop_ongoing,
+            ),
+            popular_completed=HomepageCollectionRead(
+                id="popular_completed",
+                title="Популярное завершённое",
+                subtitle="Завершённые истории, готовые к полному прочтению",
+                see_all_url="/search?status=completed&sort_by=popularity",
+                items=pop_completed,
+            ),
+            recently_updated=HomepageCollectionRead(
+                id="recently_updated",
+                title="Недавно обновлённые",
+                subtitle="Произведения со свежими русскими главами",
+                see_all_url="/search?sort_by=updated_at",
+                items=recently_updated,
+            ),
+            recently_added=HomepageCollectionRead(
+                id="recently_added",
+                title="Недавно добавленные",
+                subtitle="Новинки в каталоге Onigiri",
+                see_all_url="/search?sort_by=created_at",
+                items=recently_added,
+            ),
+        )
 
     async def search(
         self,

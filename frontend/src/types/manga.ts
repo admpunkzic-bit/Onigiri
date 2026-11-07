@@ -116,3 +116,21 @@ export interface ReadingHistoryItem {
   total_pages?: number | null
   updated_at: string
 }
+
+export interface HomepageCollection {
+  id: string
+  title: string
+  subtitle?: string | null
+  see_all_url?: string | null
+  items: MangaItem[]
+}
+
+export interface HomepageData {
+  continue_reading: ReadingHistoryItem[]
+  for_you: HomepageCollection
+  popular_ongoing: HomepageCollection
+  popular_completed: HomepageCollection
+  recently_updated: HomepageCollection
+  recently_added: HomepageCollection
+}
+

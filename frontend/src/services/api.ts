@@ -8,6 +8,8 @@
 import type {
   ChapterItem,
   ChapterReaderDetail,
+  HomepageCollection,
+  HomepageData,
   MangaDetail,
   MangaItem,
   ReadingHistoryItem,
@@ -304,7 +306,7 @@ export async function fetchReadingProgress(
 
 const GUEST_HISTORY_STORAGE_KEY = 'onigiri_guest_history'
 
-function getGuestHistory(): ReadingHistoryItem[] {
+export function getGuestHistory(): ReadingHistoryItem[] {
   if (typeof window === 'undefined') return []
   try {
     const raw = localStorage.getItem(GUEST_HISTORY_STORAGE_KEY)
@@ -313,6 +315,39 @@ function getGuestHistory(): ReadingHistoryItem[] {
     return Array.isArray(parsed) ? parsed : []
   } catch {
     return []
+  }
+}
+
+export async function fetchHomepageData(
+  guestMangaIds?: number[],
+  signal?: AbortSignal
+): Promise<HomepageData> {
+  const queryParams = new URLSearchParams()
+  if (guestMangaIds && guestMangaIds.length > 0) {
+    queryParams.set('guest_manga_ids', guestMangaIds.join(','))
+  }
+  const qs = queryParams.toString() ? `?${queryParams.toString()}` : ''
+  const data = await request<HomepageData>(`/homepage${qs}`, { signal })
+
+  const mapCollection = (col: HomepageCollection): HomepageCollection => ({
+    ...col,
+    items: (col.items || []).map((m) => ({
+      ...m,
+      cover_url: resolveCoverUrl(m.cover_url),
+    })),
+  })
+
+  return {
+    ...data,
+    continue_reading: (data.continue_reading || []).map((item) => ({
+      ...item,
+      cover_url: resolveCoverUrl(item.cover_url),
+    })),
+    for_you: mapCollection(data.for_you),
+    popular_ongoing: mapCollection(data.popular_ongoing),
+    popular_completed: mapCollection(data.popular_completed),
+    recently_updated: mapCollection(data.recently_updated),
+    recently_added: mapCollection(data.recently_added),
   }
 }
 

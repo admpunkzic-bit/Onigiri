@@ -273,3 +273,29 @@ class ReadingHistoryItemRead(BaseModel):
     updated_at: str
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# Homepage Collections Schemas (TASK 018)
+# ==========================================
+
+class HomepageCollectionRead(BaseModel):
+    id: str
+    title: str
+    subtitle: Optional[str] = None
+    see_all_url: Optional[str] = None
+    items: List[MangaListRead] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class HomepageDataRead(BaseModel):
+    continue_reading: List[ReadingHistoryItemRead] = []
+    for_you: HomepageCollectionRead
+    popular_ongoing: HomepageCollectionRead
+    popular_completed: HomepageCollectionRead
+    recently_updated: HomepageCollectionRead
+    recently_added: HomepageCollectionRead
+
+    model_config = ConfigDict(from_attributes=True)
+

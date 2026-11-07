@@ -7,7 +7,7 @@ import asyncio
 import sqlite3
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 import httpx
@@ -26,11 +26,13 @@ from providers.base import (
     ProviderSearchResult,
 )
 from providers.registry import ProviderRegistry
-from api.auth import require_telegram_user
+from api.auth import get_current_telegram_user, require_telegram_user
 from schemas.manga import (
     ChapterRead,
     ChapterReaderDetailRead,
     GenreRead,
+    HomepageCollectionRead,
+    HomepageDataRead,
     MangaDetailRead,
     MangaListRead,
     ReadingHistoryItemRead,
@@ -118,6 +120,140 @@ async def health_check():
         "version": "0.1.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ==============================================================================
+# Homepage & Dynamic Collections (TASK 018)
+# ==============================================================================
+
+@router.get("/homepage", response_model=HomepageDataRead)
+async def get_homepage(
+    guest_manga_ids: Optional[str] = Query(None, description="Comma-separated manga IDs from guest library/history"),
+    auth_user: Optional[Dict[str, Any]] = Depends(get_current_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+    reader_service: ReaderService = Depends(get_reader_service),
+):
+    """
+    Get full dynamic homepage payload in a single high-performance roundtrip:
+    - continue_reading (if user has reading progress)
+    - for_you (personalized based on library & history genres)
+    - popular_ongoing (works currently releasing)
+    - popular_completed (finished stories ready to read)
+    - recently_updated (titles with fresh Russian chapters)
+    - recently_added (newest additions in catalog)
+    """
+    g_ids: List[int] = []
+    if guest_manga_ids:
+        for part in guest_manga_ids.split(","):
+            try:
+                val = int(part.strip())
+                if val > 0:
+                    g_ids.append(val)
+            except ValueError:
+                pass
+
+    user_id_str = str(auth_user["id"]) if auth_user and "id" in auth_user else None
+
+    homepage_data = catalog_service.get_homepage_data(
+        user_id=user_id_str,
+        guest_manga_ids=g_ids,
+        limit=12,
+    )
+
+    if user_id_str:
+        try:
+            history_items = reader_service.get_user_history(user_id_str)
+            homepage_data.continue_reading = history_items[:6]
+        except Exception as exc:
+            logger.warning("Error loading continue_reading for user %s: %s", user_id_str, exc)
+
+    return homepage_data
+
+
+@router.get("/manga/collections/{collection_name}", response_model=HomepageCollectionRead)
+async def get_collection(
+    collection_name: str,
+    guest_manga_ids: Optional[str] = Query(None, description="Comma-separated manga IDs from guest library/history"),
+    limit: int = Query(20, ge=1, le=50, description="Items limit"),
+    auth_user: Optional[Dict[str, Any]] = Depends(get_current_telegram_user),
+    catalog_service: CatalogService = Depends(get_catalog_service),
+):
+    """
+    Get items for a specific dynamic homepage collection.
+    Supported collections:
+    - popular-completed (popular_completed)
+    - popular-ongoing (popular_ongoing)
+    - for-you (for_you)
+    - recently-added (recently_added)
+    - recently-updated (recently_updated)
+    """
+    c_name = collection_name.lower().replace("-", "_")
+    user_id_str = str(auth_user["id"]) if auth_user and "id" in auth_user else None
+
+    g_ids: List[int] = []
+    if guest_manga_ids:
+        for part in guest_manga_ids.split(","):
+            try:
+                val = int(part.strip())
+                if val > 0:
+                    g_ids.append(val)
+            except ValueError:
+                pass
+
+    if c_name in ("popular_completed", "completed"):
+        items = catalog_service.get_popular_completed(limit=limit)
+        return HomepageCollectionRead(
+            id="popular_completed",
+            title="Популярное завершённое",
+            subtitle="Завершённые истории, готовые к полному прочтению",
+            see_all_url="/search?status=completed&sort_by=popularity",
+            items=items,
+        )
+    elif c_name in ("popular_ongoing", "ongoing"):
+        items = catalog_service.get_popular_ongoing(limit=limit)
+        return HomepageCollectionRead(
+            id="popular_ongoing",
+            title="Популярные онгоинги",
+            subtitle="Произведения, которые сейчас выходят",
+            see_all_url="/search?status=ongoing&sort_by=popularity",
+            items=items,
+        )
+    elif c_name in ("for_you", "personalized", "style"):
+        items, is_personalized = catalog_service.get_personalized_recommendations(
+            user_id=user_id_str, guest_manga_ids=g_ids, limit=limit
+        )
+        subtitle = (
+            "Подобрано на основе жанров манги из вашей библиотеки и истории чтения"
+            if is_personalized
+            else "Популярные произведения Onigiri. Читайте или сохраняйте мангу, чтобы настроить рекомендации"
+        )
+        return HomepageCollectionRead(
+            id="for_you",
+            title="Манга в вашем стиле",
+            subtitle=subtitle,
+            see_all_url="/search?sort_by=rating",
+            items=items,
+        )
+    elif c_name in ("recently_added", "new"):
+        items = catalog_service.get_recently_added(limit=limit)
+        return HomepageCollectionRead(
+            id="recently_added",
+            title="Недавно добавленные",
+            subtitle="Новинки в каталоге Onigiri",
+            see_all_url="/search?sort_by=created_at",
+            items=items,
+        )
+    elif c_name in ("recently_updated", "updated"):
+        items = catalog_service.get_recently_updated(limit=limit)
+        return HomepageCollectionRead(
+            id="recently_updated",
+            title="Недавно обновлённые",
+            subtitle="Произведения со свежими русскими главами",
+            see_all_url="/search?sort_by=updated_at",
+            items=items,
+        )
+    else:
+        raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found")
 
 
 # ==============================================================================
