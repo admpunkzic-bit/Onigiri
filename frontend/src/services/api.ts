@@ -8,7 +8,6 @@
 import type {
   ChapterItem,
   ChapterReaderDetail,
-  HomepageCollection,
   HomepageData,
   MangaDetail,
   MangaItem,
@@ -24,6 +23,10 @@ export function resolveCoverUrl(url?: string | null): string | null {
   if (!url) return null
   const clean = url.trim()
   if (!clean) return null
+  // Guard against double proxying: if URL is already a proxy URL, return as-is
+  if (clean.includes('/manga/cover/proxy')) {
+    return clean
+  }
   if (
     clean.includes('uploads.mangadex.org') ||
     clean.includes('manga-chan.me') ||
@@ -327,28 +330,7 @@ export async function fetchHomepageData(
     queryParams.set('guest_manga_ids', guestMangaIds.join(','))
   }
   const qs = queryParams.toString() ? `?${queryParams.toString()}` : ''
-  const data = await request<HomepageData>(`/homepage${qs}`, { signal })
-
-  const mapCollection = (col: HomepageCollection): HomepageCollection => ({
-    ...col,
-    items: (col.items || []).map((m) => ({
-      ...m,
-      cover_url: resolveCoverUrl(m.cover_url),
-    })),
-  })
-
-  return {
-    ...data,
-    continue_reading: (data.continue_reading || []).map((item) => ({
-      ...item,
-      cover_url: resolveCoverUrl(item.cover_url),
-    })),
-    for_you: mapCollection(data.for_you),
-    popular_ongoing: mapCollection(data.popular_ongoing),
-    popular_completed: mapCollection(data.popular_completed),
-    recently_updated: mapCollection(data.recently_updated),
-    recently_added: mapCollection(data.recently_added),
-  }
+  return request<HomepageData>(`/homepage${qs}`, { signal })
 }
 
 function saveGuestHistory(items: ReadingHistoryItem[]): void {

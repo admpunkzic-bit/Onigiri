@@ -323,13 +323,28 @@ class CatalogService:
             if m_id not in rows:
                 continue
             r = rows[m_id]
+            cover = r["cover_url"]
+            if not cover:
+                cursor.execute(
+                    """
+                    SELECT cover_url FROM manga
+                    WHERE (title = ? OR original_title = ?)
+                      AND cover_url IS NOT NULL AND cover_url != ''
+                    LIMIT 1
+                    """,
+                    (r["title"], r["original_title"]),
+                )
+                alt = cursor.fetchone()
+                if alt:
+                    cover = alt["cover_url"]
+
             results.append(
                 MangaListRead(
                     id=r["id"],
                     title=r["title"],
                     slug=r["slug"],
                     original_title=r["original_title"],
-                    cover_url=r["cover_url"],
+                    cover_url=cover,
                     status=r["status"],
                     type=r["type"],
                     release_year=r["release_year"],

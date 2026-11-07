@@ -58,7 +58,8 @@ export default function MangaCard({ manga }: MangaCardProps) {
           <img
             src={coverSrc}
             alt={manga.title}
-            loading="eager"
+            loading="lazy"
+            decoding="async"
             referrerPolicy="no-referrer"
             onError={() => setImageError(true)}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"

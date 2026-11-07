@@ -249,3 +249,4 @@ def test_individual_collections_api_endpoint():
         # Test 404 for unknown collection
         r4 = client.get("/api/manga/collections/non-existent-collection")
         assert r4.status_code == 404
+

@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { History, Play, ChevronRight, BookOpen } from 'lucide-react'
 import type { ReadingHistoryItem } from '../types/manga'
@@ -5,6 +6,78 @@ import { resolveCoverUrl } from '../services/api'
 
 interface ContinueReadingRibbonProps {
   items: ReadingHistoryItem[]
+}
+
+function ContinueReadingCard({ item }: { item: ReadingHistoryItem }) {
+  const [imageError, setImageError] = useState(false)
+  const coverSrc = resolveCoverUrl(item.cover_url)
+
+  useEffect(() => {
+    setImageError(false)
+  }, [coverSrc])
+
+  const chapterLabel =
+    item.chapter_number != null
+      ? `Глава ${item.chapter_number}`
+      : item.chapter_title?.trim() || 'Глава'
+
+  return (
+    <div className="w-64 sm:w-72 shrink-0 snap-start bg-surface rounded-xl border border-white/5 hover:border-accent/30 p-2.5 transition-all group flex gap-3 shadow-xs">
+      {/* Cover thumbnail */}
+      <Link
+        to={`/manga/${item.manga_slug || item.manga_id}/chapter/${item.chapter_id}`}
+        state={{ initialPage: item.page_number, translationId: item.translation_id }}
+        className="w-16 sm:w-18 aspect-[3/4] rounded-lg overflow-hidden bg-white/5 shrink-0 block relative"
+        title={`Продолжить чтение ${item.manga_title}`}
+      >
+        {coverSrc && !imageError ? (
+          <img
+            src={coverSrc}
+            alt={item.manga_title}
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-surface-secondary">
+            <BookOpen size={18} className="text-text-secondary/50" />
+          </div>
+        )}
+      </Link>
+
+      {/* Information & Action */}
+      <div className="flex flex-col justify-between min-w-0 flex-1 py-0.5">
+        <div>
+          <Link
+            to={`/manga/${item.manga_slug || item.manga_id}`}
+            className="text-xs font-semibold text-text-primary hover:text-accent truncate block transition-colors leading-tight"
+            title={item.manga_title}
+          >
+            {item.manga_title}
+          </Link>
+          <p className="text-[11px] text-text-secondary mt-1 truncate">
+            <span className="font-medium text-text-primary/90">{chapterLabel}</span>
+            {item.page_number > 0 && (
+              <span className="text-[10px] text-accent ml-1.5 font-medium">
+                (стр. {item.page_number}{item.total_pages ? ` / ${item.total_pages}` : ''})
+              </span>
+            )}
+          </p>
+        </div>
+
+        <Link
+          to={`/manga/${item.manga_slug || item.manga_id}/chapter/${item.chapter_id}`}
+          state={{ initialPage: item.page_number, translationId: item.translation_id }}
+          className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white bg-accent/90 hover:bg-accent px-3 py-1.5 rounded-lg transition-all active:scale-95 w-fit mt-2 shadow-xs cursor-pointer"
+        >
+          <Play size={10} className="fill-white" />
+          <span>Продолжить</span>
+        </Link>
+      </div>
+    </div>
+  )
 }
 
 export default function ContinueReadingRibbon({ items }: ContinueReadingRibbonProps) {
@@ -40,72 +113,14 @@ export default function ContinueReadingRibbon({ items }: ContinueReadingRibbonPr
 
       {/* Horizontal Cards */}
       <div className="flex gap-3 overflow-x-auto pb-2 pt-0.5 px-0.5 -mx-0.5 scrollbar-none snap-x snap-mandatory">
-        {items.map((item) => {
-          const coverSrc = resolveCoverUrl(item.cover_url)
-          const chapterLabel =
-            item.chapter_number != null
-              ? `Глава ${item.chapter_number}`
-              : item.chapter_title?.trim() || 'Глава'
-
-          return (
-            <div
-              key={`${item.manga_id}_${item.chapter_id}`}
-              className="w-64 sm:w-72 shrink-0 snap-start bg-surface rounded-xl border border-white/5 hover:border-accent/30 p-2.5 transition-all group flex gap-3 shadow-xs"
-            >
-              {/* Cover thumbnail */}
-              <Link
-                to={`/manga/${item.manga_slug || item.manga_id}/chapter/${item.chapter_id}`}
-                state={{ initialPage: item.page_number, translationId: item.translation_id }}
-                className="w-16 sm:w-18 aspect-[3/4] rounded-lg overflow-hidden bg-white/5 shrink-0 block relative"
-                title={`Продолжить чтение ${item.manga_title}`}
-              >
-                {coverSrc ? (
-                  <img
-                    src={coverSrc}
-                    alt={item.manga_title}
-                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    loading="eager"
-                  />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center bg-surface-secondary">
-                    <BookOpen size={18} className="text-text-secondary/50" />
-                  </div>
-                )}
-              </Link>
-
-              {/* Information & Action */}
-              <div className="flex flex-col justify-between min-w-0 flex-1 py-0.5">
-                <div>
-                  <Link
-                    to={`/manga/${item.manga_slug || item.manga_id}`}
-                    className="text-xs font-semibold text-text-primary hover:text-accent truncate block transition-colors leading-tight"
-                    title={item.manga_title}
-                  >
-                    {item.manga_title}
-                  </Link>
-                  <p className="text-[11px] text-text-secondary mt-1 truncate">
-                    <span className="font-medium text-text-primary/90">{chapterLabel}</span>
-                    {item.page_number > 0 && (
-                      <span className="text-[10px] text-accent ml-1.5 font-medium">
-                        (стр. {item.page_number}{item.total_pages ? ` / ${item.total_pages}` : ''})
-                      </span>
-                    )}
-                  </p>
-                </div>
-
-                <Link
-                  to={`/manga/${item.manga_slug || item.manga_id}/chapter/${item.chapter_id}`}
-                  state={{ initialPage: item.page_number, translationId: item.translation_id }}
-                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white bg-accent/90 hover:bg-accent px-3 py-1.5 rounded-lg transition-all active:scale-95 w-fit mt-2 shadow-xs cursor-pointer"
-                >
-                  <Play size={10} className="fill-white" />
-                  <span>Продолжить</span>
-                </Link>
-              </div>
-            </div>
-          )
-        })}
+        {items.map((item) => (
+          <ContinueReadingCard
+            key={`${item.manga_id}_${item.chapter_id}`}
+            item={item}
+          />
+        ))}
       </div>
     </section>
   )
 }
+
