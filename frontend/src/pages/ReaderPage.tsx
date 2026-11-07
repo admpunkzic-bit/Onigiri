@@ -175,39 +175,98 @@ export default function ReaderPage() {
     }
   }
 
-  // ── Auto-Hide Controls Timer ───────────────────────────────
-  const resetAutoHideTimer = useCallback(() => {
+  // ── Auto-Hide Controls & Inactivity Management ───────────────
+  const isToolbarInteractingRef = useRef(false)
+  const suppressWakeRef = useRef(0)
+
+  const clearAutoHideTimer = useCallback(() => {
     if (hideControlsTimerRef.current) {
       window.clearTimeout(hideControlsTimerRef.current)
       hideControlsTimerRef.current = null
     }
-    if (settings.autoHideControls && controlsVisible) {
-      hideControlsTimerRef.current = window.setTimeout(() => {
-        setControlsVisible(false)
-      }, 3500)
-    }
-  }, [settings.autoHideControls, controlsVisible])
+  }, [])
 
+  const startAutoHideTimer = useCallback(() => {
+    clearAutoHideTimer()
+    if (!settings.autoHideControls) return
+    if (isToolbarInteractingRef.current) return
+
+    hideControlsTimerRef.current = window.setTimeout(() => {
+      setControlsVisible(false)
+    }, 4000)
+  }, [settings.autoHideControls, clearAutoHideTimer])
+
+  // Explicit user activity: mouse move, touch, scroll, keyboard
+  const handleUserActivity = useCallback(() => {
+    if (Date.now() < suppressWakeRef.current) return
+
+    setControlsVisible(true)
+    startAutoHideTimer()
+  }, [startAutoHideTimer])
+
+  // Global listeners for mouse move, touch, scroll, keydown
   useEffect(() => {
-    if (controlsVisible && settings.autoHideControls) {
-      resetAutoHideTimer()
+    if (!settings.autoHideControls) {
+      clearAutoHideTimer()
+      setControlsVisible(true)
+      return
     }
-    return () => {
-      if (hideControlsTimerRef.current) {
-        window.clearTimeout(hideControlsTimerRef.current)
-        hideControlsTimerRef.current = null
+
+    startAutoHideTimer()
+
+    let lastMoveTime = 0
+    const onPointerMove = () => {
+      const now = Date.now()
+      if (now - lastMoveTime > 150) {
+        lastMoveTime = now
+        handleUserActivity()
       }
     }
-  }, [controlsVisible, settings.autoHideControls, resetAutoHideTimer])
+    const onTouchStart = () => {
+      handleUserActivity()
+    }
+    const onScroll = () => {
+      handleUserActivity()
+    }
+    const onKeyDown = () => {
+      handleUserActivity()
+    }
+
+    window.addEventListener('pointermove', onPointerMove, { passive: true })
+    window.addEventListener('touchstart', onTouchStart, { passive: true })
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('keydown', onKeyDown, { passive: true })
+
+    return () => {
+      clearAutoHideTimer()
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('touchstart', onTouchStart)
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [settings.autoHideControls, handleUserActivity, startAutoHideTimer, clearAutoHideTimer])
 
   const handleToggleControls = () => {
     setControlsVisible((prev) => {
       const next = !prev
-      if (next && settings.autoHideControls) {
-        resetAutoHideTimer()
+      if (!next) {
+        clearAutoHideTimer()
+        suppressWakeRef.current = Date.now() + 400
+      } else {
+        startAutoHideTimer()
       }
       return next
     })
+  }
+
+  const handleToolbarInteractionStart = () => {
+    isToolbarInteractingRef.current = true
+    clearAutoHideTimer()
+  }
+
+  const handleToolbarInteractionEnd = () => {
+    isToolbarInteractingRef.current = false
+    startAutoHideTimer()
   }
 
   // ── Chapter Transitions ────────────────────────────────────
@@ -289,7 +348,19 @@ export default function ReaderPage() {
         onPrevChapter={handlePrevChapter}
         onNextChapter={handleNextChapter}
         onPageSelect={(p) => setCurrentPage(p)}
+        onInteractionStart={handleToolbarInteractionStart}
+        onInteractionEnd={handleToolbarInteractionEnd}
       />
+
+      {/* Top activation sensor bar for easy restore on tap/hover near top */}
+      {!controlsVisible && (
+        <div
+          onClick={handleUserActivity}
+          onMouseEnter={handleUserActivity}
+          className="fixed top-0 left-0 right-0 h-16 z-30 cursor-pointer"
+          title="Показать меню"
+        />
+      )}
 
       {/* Reader Body: Vertical vs Paged */}
       <main className="w-full">

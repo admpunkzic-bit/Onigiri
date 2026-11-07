@@ -72,7 +72,10 @@ export default function VerticalReader({
   }, [pages, onPageChange])
 
   return (
-    <div className="w-full flex flex-col items-center py-16 px-2 sm:px-0">
+    <div
+      onClick={onToggleControls}
+      className="w-full min-h-screen flex flex-col items-center py-16 px-2 sm:px-0 cursor-default"
+    >
       <div className="w-full max-w-2xl space-y-2">
         {pages.map((p) => (
           <PageImage
@@ -97,7 +100,10 @@ export default function VerticalReader({
             {nextChapterId ? (
               <div className="space-y-2">
                 <button
-                  onClick={onNextChapter}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onNextChapter?.()
+                  }}
                   className="w-full inline-flex items-center justify-center gap-2 py-3 px-4 bg-accent hover:bg-accent/90 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
                 >
                   <span>Следующая глава</span>

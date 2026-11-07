@@ -21,6 +21,8 @@ interface ReaderToolbarProps {
   onPrevChapter?: () => void
   onNextChapter?: () => void
   onPageSelect?: (page: number) => void
+  onInteractionStart?: () => void
+  onInteractionEnd?: () => void
 }
 
 export default function ReaderToolbar({
@@ -37,6 +39,8 @@ export default function ReaderToolbar({
   onToggleMode,
   onPrevChapter,
   onNextChapter,
+  onInteractionStart,
+  onInteractionEnd,
 }: ReaderToolbarProps) {
   const hasChapterNum = chapterNumber !== null && chapterNumber !== undefined
   const formattedNumber = hasChapterNum ? String(chapterNumber) : null
@@ -48,6 +52,10 @@ export default function ReaderToolbar({
     <>
       {/* Top Bar */}
       <header
+        onMouseEnter={onInteractionStart}
+        onMouseLeave={onInteractionEnd}
+        onTouchStart={onInteractionStart}
+        onTouchEnd={onInteractionEnd}
         className={`fixed top-0 left-0 right-0 z-40 bg-surface/90 backdrop-blur-md border-b border-white/5 transition-transform duration-200 select-none ${
           visible ? 'translate-y-0' : '-translate-y-full pointer-events-none'
         }`}
@@ -56,7 +64,10 @@ export default function ReaderToolbar({
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
             <button
-              onClick={onBack}
+              onClick={(e) => {
+                e.stopPropagation()
+                onBack()
+              }}
               className="p-1.5 text-text-secondary hover:text-text-primary transition-colors cursor-pointer rounded-lg hover:bg-white/5"
               title="Назад к манге"
             >
@@ -74,7 +85,10 @@ export default function ReaderToolbar({
 
           <div className="flex items-center gap-2">
             <button
-              onClick={onToggleMode}
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleMode()
+              }}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary bg-white/5 hover:bg-white/10 rounded-xl border border-white/5 transition-colors cursor-pointer"
               title="Переключить режим чтения"
             >
@@ -96,6 +110,10 @@ export default function ReaderToolbar({
 
       {/* Bottom Bar */}
       <footer
+        onMouseEnter={onInteractionStart}
+        onMouseLeave={onInteractionEnd}
+        onTouchStart={onInteractionStart}
+        onTouchEnd={onInteractionEnd}
         className={`fixed bottom-0 left-0 right-0 z-40 bg-surface/90 backdrop-blur-md border-t border-white/5 transition-transform duration-200 select-none ${
           visible ? 'translate-y-0' : 'translate-y-full pointer-events-none'
         }`}
@@ -104,7 +122,10 @@ export default function ReaderToolbar({
         <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
           {/* Prev Chapter */}
           <button
-            onClick={onPrevChapter}
+            onClick={(e) => {
+              e.stopPropagation()
+              onPrevChapter?.()
+            }}
             disabled={!prevChapterId}
             className="inline-flex items-center gap-1 text-xs font-medium text-text-secondary hover:text-text-primary disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer px-2 py-1 rounded-lg"
           >
@@ -119,7 +140,10 @@ export default function ReaderToolbar({
 
           {/* Next Chapter */}
           <button
-            onClick={onNextChapter}
+            onClick={(e) => {
+              e.stopPropagation()
+              onNextChapter?.()
+            }}
             disabled={!nextChapterId}
             className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:text-accent-secondary disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer px-2 py-1 rounded-lg"
           >

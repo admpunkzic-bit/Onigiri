@@ -109,7 +109,15 @@ export default function PagedReader({
   const handleZoneClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const clickX = e.clientX - rect.left
+    const clickY = e.clientY - rect.top
     const widthRatio = clickX / rect.width
+    const heightRatio = clickY / rect.height
+
+    // Tapping top 20% of the screen always toggles/restores controls
+    if (heightRatio < 0.2) {
+      onToggleControls()
+      return
+    }
 
     if (widthRatio < 0.3) {
       handlePrev()
