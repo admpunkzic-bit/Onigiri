@@ -230,6 +230,8 @@ export async function fetchChapterPages(
             ? img
             : `/${img}`
       }
+      const sep = img.includes('?') ? '&' : '?'
+      img = `${img}${sep}v=014.5`
       return {
         ...p,
         image_url: img,

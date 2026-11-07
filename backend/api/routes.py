@@ -377,6 +377,7 @@ async def get_page_image(
     chapter_id: int,
     page_number: int,
     data_saver: bool = Query(False, description="Use dataSaver compressed image"),
+    v: Optional[str] = Query(None, description="Cache buster version tag"),
     enable_mangadex: bool = Depends(get_enable_mangadex),
     reader_service: ReaderService = Depends(get_reader_service),
 ):
@@ -394,7 +395,7 @@ async def get_page_image(
         content=image_bytes,
         media_type=content_type,
         headers={
-            "Cache-Control": "public, max-age=86400, immutable",
+            "Cache-Control": "public, max-age=86400",
         },
     )
 

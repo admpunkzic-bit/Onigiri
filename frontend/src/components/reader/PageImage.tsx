@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 import { API_BASE_URL } from '../../services/api'
 
@@ -19,6 +19,7 @@ export default function PageImage({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
+  const imgRef = useRef<HTMLImageElement>(null)
 
   // Reset state when image source changes
   useEffect(() => {
@@ -35,10 +36,10 @@ export default function PageImage({
   }
 
   // Normalize source URL: if it's a relative /api path, resolve against API host
-  const normalizedBase = API_BASE_URL.replace(/http:\/\/localhost:/g, 'http://127.0.0.1:').replace(/\/api\/?$/, '')
+  const normalizedBase = API_BASE_URL.replace(/http:\/\/localhost:8000/g, 'http://127.0.0.1:8000').replace(/\/api\/?$/, '')
   const normalizedSrc = src.startsWith('/api')
     ? (normalizedBase ? `${normalizedBase}${src}` : src)
-    : src.replace(/http:\/\/localhost:/g, 'http://127.0.0.1:')
+    : src.replace(/http:\/\/localhost:8000/g, 'http://127.0.0.1:8000')
 
   // Add retry bust query if retrying
   const currentSrc =
@@ -47,6 +48,13 @@ export default function PageImage({
         ? `${normalizedSrc}&retry=${retryCount}`
         : `${normalizedSrc}?retry=${retryCount}`
       : normalizedSrc
+
+  // Immediate detection if image is already loaded from browser cache or fast stream
+  useEffect(() => {
+    if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+      setLoading(false)
+    }
+  }, [currentSrc])
 
   return (
     <div
@@ -86,9 +94,11 @@ export default function PageImage({
       {/* Actual Image */}
       {!error && (
         <img
+          ref={imgRef}
           src={currentSrc}
           alt={alt}
-          loading="lazy"
+          loading="eager"
+          decoding="async"
           onLoad={() => setLoading(false)}
           onError={() => {
             setLoading(false)

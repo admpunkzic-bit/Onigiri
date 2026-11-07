@@ -5,6 +5,7 @@ adjacent chapter navigation, and Telegram user reading progress persistence.
 """
 
 import asyncio
+from collections import OrderedDict
 import ipaddress
 import logging
 import socket
@@ -16,7 +17,7 @@ from urllib.parse import urlsplit, urljoin
 import httpx
 from fastapi import HTTPException
 
-from providers.base import ProviderPagesResult
+from providers.base import ProviderPagesResult, ProviderPageItem
 from providers.registry import ProviderRegistry
 from schemas.manga import (
     ChapterReaderDetailRead,
@@ -42,6 +43,11 @@ ATHOME_CACHE_TTL_SECONDS = 600.0  # 10 minutes TTL
 # SingleFlight concurrency deduplication: cache_key -> asyncio.Task
 _ATHOME_IN_FLIGHT: Dict[str, asyncio.Task] = {}
 _ATHOME_LOCK = asyncio.Lock()
+
+# In-memory LRU cache for rendered page images: f"{chapter_id}_{page_number}_{data_saver}" -> (bytes, content_type)
+_PAGE_IMAGE_CACHE: OrderedDict[str, Tuple[bytes, str]] = OrderedDict()
+_MAX_PAGE_IMAGE_CACHE_ITEMS = 300
+_PAGE_IMAGE_CACHE_LOCK = asyncio.Lock()
 
 
 def validate_and_resolve_url_ssrf(target_url: str) -> str:
@@ -186,6 +192,39 @@ class ReaderService:
         Execute AtHome provider fetch, update cache, and ensure cleanup from in-flight map.
         """
         provider = self.registry.get(provider_id)
+        # Check SQLite chapter_pages first for zero-latency retrieval
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                """
+                SELECT cp.page_number, cp.image_url
+                FROM chapter_pages cp
+                JOIN chapters c ON c.id = cp.chapter_id
+                WHERE c.source_chapter_id = ?
+                ORDER BY cp.page_number ASC
+                """,
+                (source_chapter_id,),
+            )
+            db_pages = cur.fetchall()
+            if db_pages:
+                cached_res = ProviderPagesResult(
+                    provider_id=provider_id,
+                    provider_chapter_id=source_chapter_id,
+                    pages=[
+                        ProviderPageItem(page_number=r["page_number"], image_url=r["image_url"])
+                        for r in db_pages
+                    ],
+                    data_saver=data_saver,
+                    expires_at=None,
+                )
+                _ATHOME_CACHE[cache_key] = {
+                    "result": cached_res,
+                    "cached_at": time.time(),
+                }
+                return cached_res
+        except Exception as db_err:
+            logger.debug("chapter_pages initial check: %s", db_err)
+
         try:
             result = await provider.get_chapter_pages(
                 provider_chapter_id=source_chapter_id,
@@ -195,10 +234,57 @@ class ReaderService:
                 "result": result,
                 "cached_at": time.time(),
             }
+            try:
+                cur = self.conn.cursor()
+                cur.execute("SELECT id FROM chapters WHERE source_chapter_id = ?", (source_chapter_id,))
+                ch_row = cur.fetchone()
+                if ch_row:
+                    for p in result.pages:
+                        cur.execute(
+                            "INSERT OR REPLACE INTO chapter_pages (chapter_id, page_number, image_url) VALUES (?, ?, ?)",
+                            (ch_row["id"], p.page_number, p.image_url),
+                        )
+                    self.conn.commit()
+            except Exception as db_save_err:
+                logger.debug("Could not persist chapter_pages: %s", db_save_err)
+
             return result
         except HTTPException:
             raise
         except Exception as exc:
+            try:
+                cur = self.conn.cursor()
+                cur.execute(
+                    """
+                    SELECT cp.page_number, cp.image_url
+                    FROM chapter_pages cp
+                    JOIN chapters c ON c.id = cp.chapter_id
+                    WHERE c.source_chapter_id = ?
+                    ORDER BY cp.page_number ASC
+                    """,
+                    (source_chapter_id,),
+                )
+                db_pages = cur.fetchall()
+                if db_pages:
+                    logger.info("Serving %d pages for chapter %s from persistent chapter_pages fallback", len(db_pages), source_chapter_id)
+                    fallback_res = ProviderPagesResult(
+                        provider_id=provider_id,
+                        provider_chapter_id=source_chapter_id,
+                        pages=[
+                            ProviderPageItem(page_number=r["page_number"], image_url=r["image_url"])
+                            for r in db_pages
+                        ],
+                        data_saver=data_saver,
+                        expires_at=None,
+                    )
+                    _ATHOME_CACHE[cache_key] = {
+                        "result": fallback_res,
+                        "cached_at": time.time(),
+                    }
+                    return fallback_res
+            except Exception as db_err:
+                logger.debug("chapter_pages fallback lookup failed: %s", db_err)
+
             logger.error(
                 "Failed to load pages for chapter %s from provider %s: %s",
                 source_chapter_id,
@@ -350,10 +436,11 @@ class ReaderService:
                     raise HTTPException(status_code=403, detail="Источник MangaDex отключён в настройках")
                 raise HTTPException(status_code=502, detail="Не удалось загрузить страницы главы ни из одного источника")
 
+        enable_param = "" if enable_mangadex else "?enable_mangadex=false"
         pages = [
             ChapterReaderPageItem(
                 page_number=p.page_number,
-                image_url=f"/api/manga/chapters/{actual_chapter_id}/pages/{p.page_number}",
+                image_url=f"/api/manga/chapters/{actual_chapter_id}/pages/{p.page_number}{enable_param}",
             )
             for p in athome_res.pages
         ]
@@ -447,6 +534,11 @@ class ReaderService:
 
         last_error = None
         for current_ch_id, current_prov in candidates:
+            cache_key = f"{current_ch_id}_{page_number}_{data_saver}"
+            async with _PAGE_IMAGE_CACHE_LOCK:
+                if cache_key in _PAGE_IMAGE_CACHE:
+                    _PAGE_IMAGE_CACHE.move_to_end(cache_key)
+                    return _PAGE_IMAGE_CACHE[cache_key]
             try:
                 athome_res = await self.get_athome_pages(
                     current_ch_id, data_saver=data_saver, provider_id=current_prov
@@ -556,6 +648,11 @@ class ReaderService:
                             content_type = header_ct
                         else:
                             raise HTTPException(status_code=502, detail="Image server returned non-image content")
+
+                    async with _PAGE_IMAGE_CACHE_LOCK:
+                        _PAGE_IMAGE_CACHE[cache_key] = (raw_bytes, content_type)
+                        if len(_PAGE_IMAGE_CACHE) > _MAX_PAGE_IMAGE_CACHE_ITEMS:
+                            _PAGE_IMAGE_CACHE.popitem(last=False)
 
                     return raw_bytes, content_type
 
