@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { BookMarked, Star } from 'lucide-react'
 import type { MangaItem } from '../types/manga'
@@ -25,6 +25,10 @@ export default function MangaCard({ manga }: MangaCardProps) {
   const primaryAuthor = manga.authors?.[0]?.name
   const statusText = statusLabels[manga.status?.toLowerCase()] || null
   const coverSrc = resolveCoverUrl(manga.cover_url)
+
+  useEffect(() => {
+    setImageError(false)
+  }, [coverSrc])
 
   return (
     <Link
@@ -54,7 +58,7 @@ export default function MangaCard({ manga }: MangaCardProps) {
           <img
             src={coverSrc}
             alt={manga.title}
-            loading="lazy"
+            loading="eager"
             referrerPolicy="no-referrer"
             onError={() => setImageError(true)}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"

@@ -196,6 +196,7 @@ _COVER_CACHE_LOCK = asyncio.Lock()
 @router.get("/manga/cover/proxy")
 async def get_manga_cover(
     url: str = Query(..., description="External cover image URL"),
+    v: Optional[str] = Query(None, description="Cache buster version tag"),
 ):
     """
     Safely proxy external manga covers to bypass anti-hotlinking and bot-challenge protections.
@@ -222,7 +223,7 @@ async def get_manga_cover(
                     content=cached_content,
                     media_type=cached_type,
                     headers={
-                        "Cache-Control": "public, max-age=604800, immutable",
+                        "Cache-Control": "public, max-age=86400",
                     },
                 )
             else:
@@ -287,7 +288,7 @@ async def get_manga_cover(
                 content=content_bytes,
                 media_type=sniffed_type,
                 headers={
-                    "Cache-Control": "public, max-age=604800, immutable",
+                    "Cache-Control": "public, max-age=86400",
                 },
             )
     except HTTPException:

@@ -227,7 +227,7 @@ export default function HistoryPage() {
                     <img
                       src={coverSrc}
                       alt={item.manga_title}
-                      loading="lazy"
+                      loading="eager"
                       className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
                     />
                   ) : (

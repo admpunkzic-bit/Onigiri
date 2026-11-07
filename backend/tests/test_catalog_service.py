@@ -786,3 +786,11 @@ def test_api_manga_chapters_list_and_sync_endpoints():
         sync_data = sync_resp.json()
         assert sync_data["status"] == "ok"
         assert sync_data["chapters_count"] == 2
+
+        # Cleanup test data
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM chapters WHERE manga_id = ?", (manga_id,))
+        c.execute("DELETE FROM manga_sources WHERE manga_id = ?", (manga_id,))
+        c.execute("DELETE FROM manga WHERE id = ?", (manga_id,))
+        conn.commit()

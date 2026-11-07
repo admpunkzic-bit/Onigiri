@@ -12,12 +12,15 @@ export default function MainLayout({ children }: MainLayoutProps) {
 
   return (
     <div
-      className="flex flex-col bg-bg min-h-screen"
-      style={{ minHeight: 'var(--app-height, 100dvh)' }}
+      className="flex flex-col bg-bg h-screen overflow-hidden"
+      style={{
+        height: 'var(--app-height, 100dvh)',
+        maxHeight: 'var(--app-height, 100dvh)',
+      }}
     >
       {/* Main content area */}
       <main
-        className="flex-1 overflow-y-auto"
+        className="flex-1 overflow-y-auto overscroll-contain"
         style={{
           paddingTop: isReaderPage ? '0px' : 'var(--safe-top)',
           paddingBottom: isReaderPage

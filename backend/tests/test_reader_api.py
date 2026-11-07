@@ -212,7 +212,14 @@ def test_db_with_chapters():
         """
     )
     conn.commit()
-    yield conn
+    try:
+        yield conn
+    finally:
+        c.execute("DELETE FROM user_reading_progress WHERE manga_id = 999")
+        c.execute("DELETE FROM chapters WHERE manga_id = 999")
+        c.execute("DELETE FROM manga_sources WHERE manga_id = 999")
+        c.execute("DELETE FROM manga WHERE id = 999")
+        conn.commit()
 
 
 def test_reader_pages_and_navigation(test_db_with_chapters):

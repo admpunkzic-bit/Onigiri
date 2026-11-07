@@ -89,12 +89,19 @@ class MangaChanProvider(BaseMangaProvider):
             # Attempt to find adjacent cover image
             cover_url = None
             pos = match.start()
-            # Look in the surrounding snippet (500 chars before and 200 chars after)
-            img_snippet = html_content[max(0, pos - 500) : min(len(html_content), pos + 200)]
-            img_match = re.search(r'<img[^>]+src=[\'"](https?://[^\'"]*(?:manga-chan|imgcover|thumbs)[^\'"]*)[\'"]', img_snippet)
+            # Look in the surrounding snippet (800 chars before and 300 chars after)
+            img_snippet = html_content[max(0, pos - 800) : min(len(html_content), pos + 300)]
+            img_match = re.search(
+                r'<img[^>]+src=[\'"]((?:https?:)?//[^\'"]*(?:manga-chan|imgcover|thumbs)[^\'"]*|/[^\'"]*(?:uploads|thumbs)[^\'"]*)[\'"]',
+                img_snippet,
+            )
             if img_match:
                 cover_url = img_match.group(1)
-                if cover_url.startswith("http://"):
+                if cover_url.startswith("//"):
+                    cover_url = "https:" + cover_url
+                elif cover_url.startswith("/"):
+                    cover_url = "https://manga-chan.me" + cover_url
+                elif cover_url.startswith("http://"):
                     cover_url = "https://" + cover_url[7:]
 
             results.append(
@@ -143,7 +150,7 @@ class MangaChanProvider(BaseMangaProvider):
         # Cover
         cover_url = None
         cover_match = re.search(
-            r'<img[^>]+id=[\'"]cover[\'"][^>]+src=[\'"](https?://[^\'"]+)[\'"]',
+            r'<img[^>]+id=[\'"]cover[\'"][^>]+src=[\'"]((?:https?:)?//[^\'"]+|/[^\'"]+)[\'"]',
             html_content,
             re.IGNORECASE,
         )
@@ -151,11 +158,20 @@ class MangaChanProvider(BaseMangaProvider):
             cover_url = cover_match.group(1)
         else:
             # Fallback search for any imgcover image
-            alt_cover = re.search(r'src=[\'"](https?://imgcover\.[^\'"]+)[\'"]', html_content)
+            alt_cover = re.search(
+                r'src=[\'"]((?:https?:)?//imgcover\.[^\'"]+|/[^\'"]*(?:uploads|thumbs)[^\'"]*)[\'"]',
+                html_content,
+                re.IGNORECASE,
+            )
             if alt_cover:
                 cover_url = alt_cover.group(1)
-        if cover_url and cover_url.startswith("http://"):
-            cover_url = "https://" + cover_url[7:]
+        if cover_url:
+            if cover_url.startswith("//"):
+                cover_url = "https:" + cover_url
+            elif cover_url.startswith("/"):
+                cover_url = "https://manga-chan.me" + cover_url
+            elif cover_url.startswith("http://"):
+                cover_url = "https://" + cover_url[7:]
 
         # Status
         status = "ongoing"
